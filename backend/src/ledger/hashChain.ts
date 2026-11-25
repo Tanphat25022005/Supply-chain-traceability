@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes } from 'crypto';
-import { EventKind, EventLink, PUBLIC_EVENT_FIELDS, SupplyChainStage, TraceEvent } from '../domain/types';
+import { EventKind, EventLink, SupplyChainStage, TraceEvent } from '../domain/types';
 import { canonicalize } from './canonicalJson';
 
 export const GENESIS_HASH = '0'.repeat(64);
@@ -15,15 +15,18 @@ export const GENESIS_HASH = '0'.repeat(64);
  *      committed with its own salt, the event hash covers the sorted
  *      commitments. A verifier can check the fields it is shown without the
  *      hidden ones ever leaving the tenant (selective disclosure).
+ * v4 — v3 plus `occurredAt` in the always-public envelope
+ *      (docs/SPEC_PHASE1_5.md §0.5): when it happened (declared) is committed
+ *      next to when it was recorded (`timestamp`).
  */
-export type HashVersion = 1 | 2 | 3;
-export const CURRENT_HASH_VERSION: HashVersion = 3;
+export type HashVersion = 1 | 2 | 3 | 4;
+export const CURRENT_HASH_VERSION: HashVersion = 4;
 
 export type HashableEvent = Pick<
   TraceEvent,
   'batchId' | 'stage' | 'actorId' | 'timestamp' | 'location' | 'notes' | 'data' | 'prevHash' | 'sequenceNumber'
 > &
-  Partial<Pick<TraceEvent, 'kind' | 'links'>>;
+  Partial<Pick<TraceEvent, 'kind' | 'links' | 'occurredAt'>>;
 
 function sha256Hex(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
@@ -79,6 +82,14 @@ export interface EnvelopeV3 {
   links: EventLink[];
 }
 
+/** v4: the v3 envelope plus when the event happened. */
+export interface EnvelopeV4 extends Omit<EnvelopeV3, 'v'> {
+  v: 4;
+  occurredAt: string;
+}
+
+export type Envelope = EnvelopeV3 | EnvelopeV4;
+
 /** Fields present on the event, in a stable order. Empty notes / absent data keys produce no claim. */
 export function eventClaims(event: HashableEvent): Claim[] {
   const claims: Claim[] = [
@@ -119,50 +130,92 @@ export function envelopeV3(event: HashableEvent): EnvelopeV3 {
   };
 }
 
-export function hashFromCommitments(envelope: EnvelopeV3, commitments: string[]): string {
+export function envelopeV4(event: HashableEvent): EnvelopeV4 {
+  if (!event.occurredAt) throw new Error('hash v4: occurredAt is required');
+  const { v: _v, ...rest } = envelopeV3(event);
+  return { v: 4, ...rest, occurredAt: event.occurredAt.toISOString() };
+}
+
+export function envelopeFor(event: HashableEvent, version: 3 | 4): Envelope {
+  return version === 4 ? envelopeV4(event) : envelopeV3(event);
+}
+
+export function hashFromCommitments(envelope: Envelope, commitments: string[]): string {
   return sha256Hex(canonicalize({ ...envelope, claims: [...commitments].sort() }));
 }
 
-export function computeEventHashV3(event: HashableEvent, claimSalts: Record<string, string>): string {
-  const commitments = eventClaims(event).map((c) => {
+function commitmentsOf(event: HashableEvent, claimSalts: Record<string, string>, version: 3 | 4): string[] {
+  return eventClaims(event).map((c) => {
     const salt = claimSalts[c.name];
-    if (!salt) throw new Error(`hash v3: no salt for claim "${c.name}"`);
+    if (!salt) throw new Error(`hash v${version}: no salt for claim "${c.name}"`);
     return claimCommitment(c.name, c.value, salt);
   });
-  return hashFromCommitments(envelopeV3(event), commitments);
 }
 
-/** Hash a new event the current way: fresh per-claim salts, v3 hash. */
+export function computeEventHashV3(event: HashableEvent, claimSalts: Record<string, string>): string {
+  return hashFromCommitments(envelopeV3(event), commitmentsOf(event, claimSalts, 3));
+}
+
+export function computeEventHashV4(event: HashableEvent, claimSalts: Record<string, string>): string {
+  return hashFromCommitments(envelopeV4(event), commitmentsOf(event, claimSalts, 4));
+}
+
+/** Hash a new event the v3 way (kept for tests and tooling; new events use sealEvent). */
 export function sealEventV3(event: HashableEvent): { hash: string; claimSalts: Record<string, string> } {
   const claimSalts = newClaimSalts(event);
   return { hash: computeEventHashV3(event, claimSalts), claimSalts };
 }
 
-/** Claims shown on the public verification page (SPEC §1.1 table). */
-export function publicClaimNames(stage: SupplyChainStage): Set<string> {
-  return new Set(['location', ...PUBLIC_EVENT_FIELDS[stage].map((k) => `data.${k}`)]);
+/** Hash a new event the current way: fresh per-claim salts, v4 hash. */
+export function sealEvent(event: HashableEvent & { occurredAt: Date }): {
+  hash: string;
+  claimSalts: Record<string, string>;
+  hashVersion: 4;
+} {
+  const claimSalts = newClaimSalts(event);
+  return { hash: computeEventHashV4(event, claimSalts), claimSalts, hashVersion: 4 };
 }
 
-/** What a verifier receives for one v3 event: the envelope, some opened claims, the rest as bare commitments. */
-export interface DisclosureV3 {
-  envelope: EnvelopeV3;
+/**
+ * Claims shown on the public verification page: the location, and the data
+ * keys the event's field schema marks public (docs/SPEC_PHASE1_5.md §2).
+ */
+export function publicClaimNames(publicDataKeys: string[]): Set<string> {
+  return new Set(['location', ...publicDataKeys.map((k) => `data.${k}`)]);
+}
+
+/** What a verifier receives for one v3/v4 event: the envelope, some opened claims, the rest as bare commitments. */
+export interface Disclosure {
+  envelope: Envelope;
   disclosed: Array<{ name: string; value: unknown; salt: string }>;
   hidden: string[];
 }
 
-export function discloseV3(event: HashableEvent, claimSalts: Record<string, string>, reveal: (name: string) => boolean): DisclosureV3 {
-  const disclosed: DisclosureV3['disclosed'] = [];
+/** @deprecated name kept for older imports — a disclosure may now carry a v4 envelope. */
+export type DisclosureV3 = Disclosure;
+
+export function disclose(
+  event: HashableEvent,
+  claimSalts: Record<string, string>,
+  reveal: (name: string) => boolean,
+  version: 3 | 4,
+): Disclosure {
+  const disclosed: Disclosure['disclosed'] = [];
   const hidden: string[] = [];
   for (const c of eventClaims(event)) {
     const salt = claimSalts[c.name];
     if (reveal(c.name)) disclosed.push({ name: c.name, value: c.value, salt });
     else hidden.push(claimCommitment(c.name, c.value, salt));
   }
-  return { envelope: envelopeV3(event), disclosed, hidden: hidden.sort() };
+  return { envelope: envelopeFor(event, version), disclosed, hidden: hidden.sort() };
+}
+
+export function discloseV3(event: HashableEvent, claimSalts: Record<string, string>, reveal: (name: string) => boolean): Disclosure {
+  return disclose(event, claimSalts, reveal, 3);
 }
 
 /** Recomputes the event hash from a disclosure — what the browser does (frontend/src/lib/verify). */
-export function hashOfDisclosure(d: DisclosureV3): string {
+export function hashOfDisclosure(d: Disclosure): string {
   const opened = d.disclosed.map((c) => claimCommitment(c.name, c.value, c.salt));
   return hashFromCommitments(d.envelope, [...opened, ...d.hidden]);
 }
@@ -191,11 +244,17 @@ export function computeEventHashV1(event: HashableEvent, signingKey: string): st
 /** Recomputes a stored event's hash from its own data; null when that is impossible here. */
 export function recomputeEventHash(event: TraceEvent, legacyKey?: string): string | null {
   switch (event.hashVersion) {
+    case 4:
+      try {
+        return event.claimSalts ? computeEventHashV4(event, event.claimSalts) : null;
+      } catch {
+        return null; // a claim without its salt — the event was altered after it was written
+      }
     case 3:
       try {
         return event.claimSalts ? computeEventHashV3(event, event.claimSalts) : null;
       } catch {
-        return null; // a claim without its salt — the event was altered after it was written
+        return null;
       }
     case 2:
       return event.salt ? computeEventHashV2(event, event.salt) : null;
@@ -222,7 +281,7 @@ export interface EventCheck {
   recomputedHash: string | null;
   matchesStoredHash: boolean;
   linksToPrevious: boolean;
-  /** True for v2/v3 events: verifiable by anyone from the published event data alone. */
+  /** True for v2+ events: verifiable by anyone from the published event data alone. */
   publiclyVerifiable: boolean;
 }
 

@@ -1,7 +1,16 @@
 import { z } from 'zod';
 
-const STAGES = ['HARVEST', 'PROCESSING', 'QUALITY_CHECK', 'PACKAGING', 'DISTRIBUTION', 'RETAIL'] as const;
-const ROLES = ['FARMER', 'PROCESSOR', 'INSPECTOR', 'DISTRIBUTOR', 'RETAILER', 'ADMIN'] as const;
+const ROLES = ['FARMER', 'COLLECTOR', 'PROCESSOR', 'WAREHOUSE', 'INSPECTOR', 'EXPORTER', 'DISTRIBUTOR', 'RETAILER', 'IMPORTER', 'ADMIN'] as const;
+/** IMPORTER comes from a receipt link, never from an invitation or a role change. */
+const ASSIGNABLE_ROLES = ['FARMER', 'COLLECTOR', 'PROCESSOR', 'WAREHOUSE', 'INSPECTOR', 'EXPORTER', 'DISTRIBUTOR', 'RETAILER', 'ADMIN'] as const;
+const LOT_STATUSES = ['ACTIVE', 'IN_TRANSIT', 'ON_HOLD', 'REJECTED', 'RECALLED', 'DESTROYED', 'CONSUMED'] as const;
+
+/** A stage code of the catalog — which ones a lot may use is checked against its workflow. */
+const stageCode = z.string().trim().regex(/^[A-Z][A-Z_]{1,40}$/, 'Stage code');
+const reason = z.string().trim().min(1).max(1000);
+/** When something happened — ISO date-time; the service refuses the future and checks the past. */
+const occurredAt = z.coerce.date().optional();
+const lateReason = z.string().trim().min(1).max(500).optional();
 
 export const loginSchema = z.object({
   email: z.string().trim().email(),
@@ -44,28 +53,37 @@ export const registerSchema = z.discriminatedUnion('mode', [
 ]);
 
 export const createInvitationSchema = z.object({
-  role: z.enum(ROLES),
+  role: z.enum(ASSIGNABLE_ROLES),
   email: z.string().trim().email().optional(),
   note: z.string().trim().max(200).optional(),
   expiresInDays: z.number().int().min(1).max(30).default(7),
 });
 
-export const createBatchSchema = z.object({
-  productName: z.string().trim().min(1).max(200),
-  productType: z.string().trim().min(1).max(200),
-  origin: z.string().trim().min(1).max(200),
-  quantity: z.number().finite().positive(),
-  unit: z.string().trim().min(1).max(50),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-  plotId: z.string().uuid().optional(),
-});
+/** A catalog product type, by id or by code/name/alias. */
+const productTypeRef = {
+  productTypeId: z.string().uuid().optional(),
+  productType: z.string().trim().min(1).max(200).optional(),
+};
+const hasProductType = (v: { productTypeId?: string; productType?: string }) => !!(v.productTypeId || v.productType);
 
-const stageEnum = z.enum(['HARVEST', 'PROCESSING', 'QUALITY_CHECK', 'PACKAGING', 'DISTRIBUTION', 'RETAIL']);
+export const createBatchSchema = z
+  .object({
+    productName: z.string().trim().min(1).max(200),
+    ...productTypeRef,
+    origin: z.string().trim().min(1).max(200),
+    quantity: z.number().finite().positive(),
+    unit: z.string().trim().min(1).max(50),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    plotId: z.string().uuid().optional(),
+    workflowCode: z.string().trim().regex(/^[A-Z][A-Z0-9_]{1,40}$/).optional(),
+  })
+  .refine(hasProductType, 'productTypeId or productType is required');
+
 const scalar = z.union([z.string().trim().max(500), z.number().finite(), z.boolean()]);
 
 export const createTransformationSchema = z.object({
-  kind: z.enum(['MERGE', 'SPLIT', 'TRANSFORM']),
-  stage: stageEnum,
+  kind: z.enum(['MERGE', 'SPLIT', 'TRANSFORM', 'REWORK', 'DOWNGRADE']),
+  stage: stageCode,
   location: z.string().trim().min(1).max(200),
   notes: z.string().trim().max(2000).optional(),
   data: z.record(z.string().regex(/^[a-zA-Z][a-zA-Z0-9]{0,39}$/), scalar).optional(),
@@ -75,16 +93,20 @@ export const createTransformationSchema = z.object({
     .max(500),
   outputs: z
     .array(
-      z.object({
-        productName: z.string().trim().min(1).max(200),
-        productType: z.string().trim().min(1).max(200),
-        quantity: z.number().finite().positive(),
-        unit: z.string().trim().min(1).max(50),
-      }),
+      z
+        .object({
+          productName: z.string().trim().min(1).max(200),
+          ...productTypeRef,
+          quantity: z.number().finite().positive(),
+          unit: z.string().trim().min(1).max(50),
+        })
+        .refine(hasProductType, 'productTypeId or productType is required'),
     )
     .min(1)
     .max(50),
   assignNextTo: z.string().uuid().optional(),
+  occurredAt,
+  lateReason,
 });
 
 const position = z.array(z.number().finite()).min(2).max(3);
@@ -115,8 +137,55 @@ export const handOffSchema = z.object({
   assignNextTo: z.string().uuid(),
 });
 
+export const createTransferSchema = z.object({
+  toActorId: z.string().uuid(),
+  packageCount: z.number().int().positive().max(1_000_000).optional(),
+  vehicle: z.string().trim().min(1).max(40).optional(),
+  documentNo: z.string().trim().min(1).max(60).optional(),
+  location: z.string().trim().min(1).max(200).optional(),
+  notes: z.string().trim().max(2000).optional(),
+  occurredAt,
+  lateReason,
+});
+
+export const respondTransferSchema = z
+  .object({
+    accept: z.boolean(),
+    receivedQuantity: z.number().finite().min(0).optional(),
+    reason: z.string().trim().min(1).max(1000).optional(),
+    location: z.string().trim().min(1).max(200).optional(),
+    occurredAt,
+    lateReason,
+  })
+  .refine((v) => (v.accept ? v.receivedQuantity !== undefined : !!v.reason), 'accept needs receivedQuantity; reject needs reason');
+
 export const recallBatchSchema = z.object({
-  reason: z.string().trim().min(1).max(1000),
+  reason,
+  /** true: recall every lot made from this one; otherwise they are put on hold for investigation. */
+  cascade: z.boolean().optional(),
+});
+
+export const reasonSchema = z.object({ reason });
+
+export const disposeBatchSchema = z.object({
+  recordNo: z.string().trim().min(1).max(60),
+  method: z.string().trim().min(1).max(200),
+  witness: z.string().trim().min(1).max(200),
+  reason: z.string().trim().min(1).max(1000).optional(),
+  occurredAt,
+});
+
+export const receiptLinkSchema = z.object({
+  importerName: z.string().trim().min(1).max(200),
+  days: z.number().int().min(1).max(90).default(30),
+});
+
+export const importReceiptSchema = z.object({
+  token: z.string().min(10),
+  receivedQuantity: z.number().finite().min(0),
+  condition: z.enum(['GOOD', 'DAMAGED', 'REJECTED']),
+  location: z.string().trim().min(1).max(200),
+  notes: z.string().trim().max(2000).optional(),
 });
 
 // Stage-specific facts (moisture, grade, destination...). Flat key → scalar
@@ -129,7 +198,7 @@ const eventDataSchema = z
 
 export const recordEventSchema = z.object({
   batchId: z.string().trim().min(1),
-  stage: z.enum(STAGES),
+  stage: stageCode,
   location: z.string().trim().min(1).max(200),
   notes: z.string().trim().max(2000).optional(),
   data: eventDataSchema.optional(),
@@ -137,6 +206,8 @@ export const recordEventSchema = z.object({
   // here, since it's conditional on role/stage) for non-ADMIN actors advancing
   // to a non-terminal stage.
   assignNextTo: z.string().trim().min(1).optional(),
+  occurredAt,
+  lateReason,
 });
 
 export const paginationSchema = z.object({
@@ -147,7 +218,8 @@ export const paginationSchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(500).default(20),
   search: z.string().trim().max(200).optional(),
   // A stage, or NONE for batches with no event yet — powers the Kanban columns.
-  stage: z.enum([...STAGES, 'NONE']).optional(),
+  stage: z.union([stageCode, z.literal('NONE')]).optional(),
+  status: z.enum(LOT_STATUSES).optional(),
 });
 
 export const updateProfileSchema = z.object({
@@ -177,7 +249,76 @@ export const setActorStatusSchema = z.object({
 });
 
 export const setActorRoleSchema = z.object({
-  role: z.enum(ROLES),
+  role: z.enum(ASSIGNABLE_ROLES),
+});
+
+// ── Catalog ─────────────────────────────────────────────────────────────────
+
+const workflowCode = z.string().trim().regex(/^[A-Z][A-Z0-9_]{1,40}$/);
+
+export const createProductTypeSchema = z.object({
+  categoryCode: z.string().trim().regex(/^[A-Z][A-Z0-9_]{1,30}$/),
+  code: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9_]{1,40}$/),
+  name: z.string().trim().min(1).max(120),
+  baseUnit: z.enum(['kg', 'cái']),
+  gtin: z.string().trim().regex(/^([0-9]{8}|[0-9]{12,14})$/).optional(),
+  defaultWorkflowCode: workflowCode.optional(),
+  aliases: z.array(z.string().trim().min(1).max(120)).max(20).optional(),
+});
+
+export const updateProductTypeSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  gtin: z.string().trim().regex(/^([0-9]{8}|[0-9]{12,14})$/).nullable().optional(),
+  defaultWorkflowCode: workflowCode.nullable().optional(),
+  aliases: z.array(z.string().trim().min(1).max(120)).max(20).optional(),
+  active: z.boolean(),
+});
+
+export const createUnitSchema = z.object({
+  productTypeId: z.string().uuid(),
+  code: z.string().trim().min(1).max(30),
+  label: z.string().trim().min(1).max(60),
+  factor: z.number().finite().positive().max(1_000_000),
+});
+
+export const mapUnmappedSchema = z.object({
+  productType: z.string().min(1).max(200),
+  unit: z.string().min(1).max(50),
+  productTypeId: z.string().uuid(),
+  unitFactor: z.number().finite().positive().max(1_000_000).optional(),
+});
+
+const source = z.string().trim().min(3).max(500);
+const ratio = z.number().finite().positive().max(1000);
+
+export const conversionFactorSchema = z.object({
+  fromTypeId: z.string().uuid(),
+  toTypeId: z.string().uuid(),
+  min: ratio,
+  max: ratio,
+  source,
+});
+
+export const processRatioSchema = z.object({
+  kind: z.enum(['MERGE', 'SPLIT', 'REWORK', 'DOWNGRADE']),
+  categoryCode: z.string().trim().regex(/^[A-Z][A-Z0-9_]{1,30}$/).nullable(),
+  min: z.number().finite().positive().max(1),
+  max: z.number().finite().positive().max(1),
+  source,
+});
+
+export const yieldCapSchema = z.object({
+  productTypeId: z.string().uuid(),
+  region: z.string().trim().min(2).max(100).nullable(),
+  maxKgPerHa: z.number().finite().positive().max(1_000_000),
+  source,
+});
+
+export const productSettingsSchema = z.object({
+  productTypeId: z.string().uuid(),
+  transitLossTolerance: z.number().finite().min(0).max(0.5),
+  maxBackdateDays: z.number().int().min(0).max(365),
+  source,
 });
 
 export const exportBatchesQuerySchema = z.object({
@@ -197,5 +338,6 @@ export const reportQuerySchema = z
     to: z.coerce.date().optional(),
     productType: z.string().trim().min(1).max(200).optional(),
     origin: z.string().trim().min(1).max(200).optional(),
+    workflowCode: z.string().trim().regex(/^[A-Z][A-Z0-9_]{1,40}$/).optional(),
   })
   .refine((q) => !q.from || !q.to || q.from < q.to, 'from must be before to');

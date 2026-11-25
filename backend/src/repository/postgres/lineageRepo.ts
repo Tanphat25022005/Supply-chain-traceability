@@ -123,38 +123,19 @@ export class PostgresLineageRepo {
     }));
   }
 
-  /** (min, max) output/input ratio for a transform between two product types, if the platform knows one. */
-  async conversionFactor(fromType: string, toType: string): Promise<{ min: number; max: number } | null> {
-    const r = await this.db.query<{ min_ratio: string; max_ratio: string }>(
-      'SELECT min_ratio, max_ratio FROM conversion_factors WHERE from_type = $1 AND to_type = $2',
-      [fromType, toType],
-    );
-    return r.rows[0] ? { min: Number(r.rows[0].min_ratio), max: Number(r.rows[0].max_ratio) } : null;
-  }
-
-  async yieldCap(productType: string): Promise<number | null> {
-    const r = await this.db.query<{ max_kg_per_ha: string }>('SELECT max_kg_per_ha FROM yield_caps WHERE product_type = $1', [
-      productType,
-    ]);
-    return r.rows[0] ? Number(r.rows[0].max_kg_per_ha) : null;
-  }
-
-  /** Harvest lots from one plot within the 365 days before `asOf` (quantities as recorded, with units). */
-  async plotHarvests(plotId: string, asOf: Date): Promise<Array<{ productType: string; quantity: number; unit: string }>> {
-    const r = await this.db.query<{ product_type: string; quantity: string; unit: string }>(
-      `SELECT product_type, quantity, unit FROM batches
+  /** Harvest lots from one plot within the 365 days before `asOf`, weighed in base units (null = not yet mapped to the catalog). */
+  async plotHarvests(
+    plotId: string,
+    asOf: Date,
+  ): Promise<Array<{ productTypeId: string | null; quantityBase: number | null }>> {
+    const r = await this.db.query<{ product_type_id: string | null; quantity_base: string | null }>(
+      `SELECT product_type_id, quantity_base FROM batches
         WHERE plot_id = $1 AND created_at > $2::timestamptz - interval '365 days' AND created_at <= $2`,
       [plotId, asOf],
     );
-    return r.rows.map((x) => ({ productType: x.product_type, quantity: Number(x.quantity), unit: x.unit }));
+    return r.rows.map((x) => ({
+      productTypeId: x.product_type_id,
+      quantityBase: x.quantity_base === null ? null : Number(x.quantity_base),
+    }));
   }
-}
-
-/** Mass in kg, or null for count units (bao, thùng…) that have no fixed weight. SPEC §5. */
-export function toKg(quantity: number, unit: string): number | null {
-  const u = unit.trim().toLowerCase();
-  if (u === 'kg') return quantity;
-  if (u === 'tấn' || u === 'tan' || u === 't') return quantity * 1000;
-  if (u === 'g') return quantity / 1000;
-  return null;
 }

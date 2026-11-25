@@ -3,7 +3,7 @@ export const openApiSpec = {
   openapi: '3.0.3',
   info: {
     title: 'TraceChain API',
-    version: '1.0.0',
+    version: '1.5.0',
     description: 'Supply-chain traceability API with a hash-chain ledger, RBAC, and anomaly detection.',
   },
   servers: [{ url: '/api' }],
@@ -18,7 +18,10 @@ export const openApiSpec = {
           id: { type: 'string', format: 'uuid' },
           name: { type: 'string' },
           email: { type: 'string', format: 'email' },
-          role: { type: 'string', enum: ['FARMER', 'PROCESSOR', 'INSPECTOR', 'DISTRIBUTOR', 'RETAILER', 'ADMIN'] },
+          role: {
+            type: 'string',
+            enum: ['FARMER', 'COLLECTOR', 'PROCESSOR', 'WAREHOUSE', 'INSPECTOR', 'EXPORTER', 'DISTRIBUTOR', 'RETAILER', 'IMPORTER', 'ADMIN'],
+          },
           organization: { type: 'string' },
           createdAt: { type: 'string', format: 'date-time' },
           isActive: { type: 'boolean' },
@@ -29,14 +32,20 @@ export const openApiSpec = {
         properties: {
           id: { type: 'string', format: 'uuid' },
           productName: { type: 'string' },
-          productType: { type: 'string' },
+          productType: { type: 'string', description: 'Catalog name (on create: a catalog name, code or alias — or send productTypeId).' },
+          productTypeId: { type: 'string', format: 'uuid' },
           origin: { type: 'string' },
           quantity: { type: 'number' },
-          unit: { type: 'string' },
+          unit: { type: 'string', description: 'kg, tấn, or a packaging unit of the product type (e.g. bao = 60 kg of green coffee).' },
+          quantityBase: { type: 'number', description: 'quantity × unitFactor, in baseUnit (kg or cái).' },
+          workflowId: { type: 'string', format: 'uuid', description: 'The workflow template version the lot follows.' },
           createdAt: { type: 'string', format: 'date-time' },
           createdBy: { type: 'string', format: 'uuid' },
           currentStage: { type: 'string', nullable: true },
-          isRecalled: { type: 'boolean' },
+          status: { type: 'string', enum: ['ACTIVE', 'IN_TRANSIT', 'ON_HOLD', 'REJECTED', 'RECALLED', 'DESTROYED', 'CONSUMED'] },
+          consumedQuantity: { type: 'number' },
+          lostQuantity: { type: 'number', description: 'Transit shortfall and disposals.' },
+          isRecalled: { type: 'boolean', description: 'Derived: status = RECALLED.' },
           recallReason: { type: 'string', nullable: true },
           metadata: { type: 'object' },
           assignedToActorId: { type: 'string', format: 'uuid', nullable: true },
@@ -54,8 +63,13 @@ export const openApiSpec = {
           id: { type: 'string', format: 'uuid' },
           batchId: { type: 'string', format: 'uuid' },
           stage: { type: 'string' },
+          kind: {
+            type: 'string',
+            enum: ['OBSERVE', 'MERGE', 'SPLIT', 'TRANSFORM', 'REWORK', 'DOWNGRADE', 'TRANSFER_OUT', 'TRANSFER_ACCEPT', 'TRANSFER_REJECT', 'TRANSFER_CANCEL', 'HOLD', 'RELEASE', 'RECALL', 'DISPOSE'],
+          },
           actorId: { type: 'string', format: 'uuid' },
-          timestamp: { type: 'string', format: 'date-time' },
+          timestamp: { type: 'string', format: 'date-time', description: 'When it was recorded (server clock).' },
+          occurredAt: { type: 'string', format: 'date-time', description: 'When it happened (declared; committed by hash v4).' },
           location: { type: 'string' },
           notes: { type: 'string', nullable: true },
           data: { type: 'object' },
@@ -64,20 +78,92 @@ export const openApiSpec = {
           sequenceNumber: { type: 'integer' },
           hashVersion: {
             type: 'integer',
-            enum: [1, 2],
+            enum: [1, 2, 3, 4],
             description:
-              '2 = SHA-256 over the RFC 8785 canonical JSON of {v, salt, batchId, sequenceNumber, prevHash, stage, actorId, timestamp, location, notes, data} — recomputable by anyone. 1 = legacy HMAC, server-verifiable only.',
+              '4 = v3 + occurredAt in the envelope (docs/SPEC_PHASE1_5.md). 3 = per-field salted commitments (selective disclosure, docs/SPEC_PHASE1.md). 2 = SHA-256 over the RFC 8785 canonical JSON of the whole event and a salt. 1 = legacy HMAC, server-verifiable only.',
           },
           salt: { type: 'string', pattern: '^[0-9a-f]{64}$', description: 'Per-event random salt (v2 only).' },
         },
       },
       Error: {
         type: 'object',
-        properties: { error: { type: 'string' } },
+        properties: {
+          error: { type: 'string' },
+          issues: {
+            type: 'array',
+            description: '422 only: one entry per field that broke the stage\'s field schema.',
+            items: { type: 'object', properties: { field: { type: 'string' }, code: { type: 'string' }, message: { type: 'string' } } },
+          },
+        },
       },
     },
   },
   paths: {
+    '/catalog': {
+      get: {
+        summary: 'Platform catalog: stages, workflow templates, product types, units, field schemas (public)',
+        responses: { '200': { description: 'Catalog' } },
+      },
+    },
+    '/catalog/tenant': {
+      get: { summary: "The catalog with the tenant's own product types and units", security: [{ bearerAuth: [] }], responses: { '200': { description: 'Catalog' } } },
+    },
+    '/catalog/reference': {
+      get: {
+        summary: 'Mass-balance reference data with sources (platform values and tenant overrides)',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: 'Conversion factors, process ratios, yield caps, product settings' } },
+      },
+    },
+    '/catalog/unmapped': {
+      get: { summary: 'Old lots not yet linked to the catalog (ADMIN)', security: [{ bearerAuth: [] }], responses: { '200': { description: 'Groups by old name and unit' } } },
+    },
+    '/batches/{id}/transfers': {
+      post: {
+        summary: 'Hand a lot over — the receiver must accept (or reject) it',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: { '201': { description: 'Transfer pending; lot IN_TRANSIT' }, '409': { description: 'Lot not ACTIVE/REJECTED, or a transfer already pending' } },
+      },
+    },
+    '/transfers/incoming': {
+      get: { summary: 'Hand-overs waiting for the caller', security: [{ bearerAuth: [] }], responses: { '200': { description: 'Pending transfers' } } },
+    },
+    '/transfers/{id}/respond': {
+      post: {
+        summary: 'Accept (with the weighed quantity) or reject (with a reason) a hand-over',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: { '200': { description: 'Answered; a shortfall beyond tolerance raises QUANTITY_DISCREPANCY' } },
+      },
+    },
+    '/transfers/{id}/cancel': {
+      post: { summary: 'The sender withdraws an unanswered hand-over', security: [{ bearerAuth: [] }], responses: { '200': { description: 'Cancelled' } } },
+    },
+    '/batches/{id}/hold': {
+      post: { summary: 'Put a lot on hold pending investigation (ADMIN/INSPECTOR)', security: [{ bearerAuth: [] }], responses: { '200': { description: 'ON_HOLD' } } },
+    },
+    '/batches/{id}/release': {
+      post: { summary: 'Release a hold with a reason (ADMIN/INSPECTOR)', security: [{ bearerAuth: [] }], responses: { '200': { description: 'Previous status restored' } } },
+    },
+    '/batches/{id}/dispose': {
+      post: {
+        summary: 'Destroy what remains of a lot, with a record number, method and witness',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: 'DESTROYED' } },
+      },
+    },
+    '/trace/{batchId}/receipt-links': {
+      post: {
+        summary: 'After EXPORT: a time-limited link for the foreign buyer to confirm receipt (EXPORTER)',
+        security: [{ bearerAuth: [] }],
+        responses: { '201': { description: 'Token and expiry' } },
+      },
+    },
+    '/trace/public/{batchId}/receipt': {
+      get: { summary: 'What the buyer sees for a receipt link (?token=)', responses: { '200': { description: 'Lot summary and export data' } } },
+      post: { summary: 'The buyer confirms what arrived (token in the body)', responses: { '201': { description: 'Receipt recorded as the last step' } } },
+    },
     '/auth/login': {
       post: {
         summary: 'Log in with email/password',
@@ -178,7 +264,12 @@ export const openApiSpec = {
           {
             name: 'stage',
             in: 'query',
-            schema: { type: 'string', enum: ['NONE', 'HARVEST', 'PROCESSING', 'QUALITY_CHECK', 'PACKAGING', 'DISTRIBUTION', 'RETAIL'] },
+            schema: { type: 'string', description: 'A stage code, or NONE for lots with no event yet' },
+          },
+          {
+            name: 'status',
+            in: 'query',
+            schema: { type: 'string', enum: ['ACTIVE', 'IN_TRANSIT', 'ON_HOLD', 'REJECTED', 'RECALLED', 'DESTROYED', 'CONSUMED'] },
           },
         ],
         responses: { '200': { description: 'Paginated batch list' } },
@@ -200,7 +291,7 @@ export const openApiSpec = {
     },
     '/batches/{id}/recall': {
       post: {
-        summary: 'Recall a batch (ADMIN or INSPECTOR)',
+        summary: 'Recall a batch (ADMIN or INSPECTOR) — lots made from it go ON_HOLD, or are recalled too with cascade: true',
         security: [{ bearerAuth: [] }],
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { reason: { type: 'string' } } } } } },

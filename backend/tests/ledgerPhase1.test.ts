@@ -5,6 +5,8 @@ import { canonicalize } from '../src/ledger/canonicalJson';
 import {
   claimCommitment,
   computeEventHashV3,
+  computeEventHashV4,
+  disclose,
   discloseV3,
   eventClaims,
   GENESIS_HASH,
@@ -37,6 +39,29 @@ function event(overrides: Partial<HashableEvent> = {}): HashableEvent {
   };
 }
 
+describe('hash v4 (occurredAt in the envelope) — SPEC_PHASE1_5 §0.5', () => {
+  it('reproduces the published v4 test vectors exactly', () => {
+    expect(vectors.hashV4.length).toBeGreaterThan(0);
+    for (const c of vectors.hashV4) {
+      const e: HashableEvent = { ...c.event, timestamp: new Date(c.event.timestamp), occurredAt: new Date(c.event.occurredAt) };
+      expect(computeEventHashV4(e, c.claimSalts)).toBe(c.hash);
+      expect(hashOfDisclosure(c.publicDisclosure)).toBe(c.hash);
+      const visible = publicClaimNames(c.publicDataKeys);
+      expect(disclose(e, c.claimSalts, (n) => visible.has(n), 4)).toEqual(c.publicDisclosure);
+      expect(c.publicDisclosure.envelope).toMatchObject({ v: 4, occurredAt: c.event.occurredAt });
+    }
+  });
+
+  it('commits to when it happened: the same event declared an hour earlier hashes differently', () => {
+    const base = { ...event(), occurredAt: new Date('2026-10-01T00:00:00.000Z') };
+    const salts = newClaimSalts(base);
+    const shifted = { ...base, occurredAt: new Date('2026-09-30T23:00:00.000Z') };
+    expect(computeEventHashV4(base, salts)).not.toBe(computeEventHashV4(shifted, salts));
+    // ...while v3 never looked at it.
+    expect(computeEventHashV3(base, salts)).toBe(computeEventHashV3(shifted, salts));
+  });
+});
+
 describe('hash v3 (selective disclosure) — SPEC §1.1', () => {
   it('reproduces the published test vectors exactly', () => {
     for (const c of vectors.hashV3) {
@@ -46,7 +71,7 @@ describe('hash v3 (selective disclosure) — SPEC §1.1', () => {
         expect(claimCommitment(claim.name, claim.value, c.claimSalts[claim.name])).toBe(c.commitments[claim.name]);
       }
       expect(hashOfDisclosure(c.publicDisclosure)).toBe(c.hash);
-      const visible = publicClaimNames(e.stage);
+      const visible = publicClaimNames(c.publicDataKeys);
       expect(discloseV3(e, c.claimSalts, (n) => visible.has(n))).toEqual(c.publicDisclosure);
     }
     expect(canonicalize(vectors.jcsExample.input)).toBe(vectors.jcsExample.canonical);

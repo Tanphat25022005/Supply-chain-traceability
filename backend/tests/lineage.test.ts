@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Actor, Batch } from '../src/domain/types';
 import { hashOfDisclosure } from '../src/ledger/hashChain';
-import { createActor, createTenant, TestDb, useTestDatabase } from './helpers/testDb';
+import { acceptHandOver, createActor, createTenant, STAGE_DATA, TestDb, useTestDatabase } from './helpers/testDb';
 
 const getDb = useTestDatabase();
 
@@ -21,10 +21,12 @@ async function world(t: TestDb) {
   const farmer = await createActor(t, tenant, 'FARMER', { organization: 'HTX Lộc Thành' });
   const processor = await createActor(t, tenant, 'PROCESSOR', { organization: 'Nhà máy Bảo Lộc' });
   const inspector = await createActor(t, tenant, 'INSPECTOR');
-  const distributor = await createActor(t, tenant, 'DISTRIBUTOR');
+  const exporter = await createActor(t, tenant, 'EXPORTER');
   const admin = await createActor(t, tenant, 'ADMIN');
-  return { tenant, farmer, processor, inspector, distributor, admin };
+  return { tenant, farmer, processor, inspector, exporter, admin };
 }
+
+const PROCESSING = { method: 'WET' };
 
 /** A harvested lot of fresh cherries from its own plot, handed to the processor. */
 async function harvestLot(t: TestDb, farmer: Actor, processor: Actor, i: number, kg = 1000): Promise<Batch> {
@@ -37,30 +39,37 @@ async function harvestLot(t: TestDb, farmer: Actor, processor: Actor, i: number,
     unit: 'kg',
     plotId: plot.id,
   });
-  await t.ctx.supplyChainService.recordEvent(farmer, { batchId: lot.id, stage: 'HARVEST', location: 'Lộc Thành', assignNextTo: processor.id });
-  return (await t.ctx.supplyChainService.getBatch(farmer, lot.id));
+  await t.ctx.supplyChainService.recordEvent(farmer, {
+    batchId: lot.id,
+    stage: 'HARVEST',
+    location: 'Lộc Thành',
+    data: { variety: 'ROBUSTA' },
+    assignNextTo: processor.id,
+  });
+  await acceptHandOver(t, processor, lot.id);
+  return t.ctx.supplyChainService.getBatch(farmer, lot.id);
 }
 
 describe('LineageService — end-to-end lineage (SPEC §3, WP4 acceptance)', () => {
-  it('200 farms → collector lot → green beans → QC → packaging → 3 containers; each traces back to all 200 plots in < 500 ms', async () => {
+  it('200 farms → mill lot → green beans → QC → 3 containers; each traces back to all 200 plots in < 500 ms', async () => {
     const t = getDb();
-    const { tenant, farmer, processor, inspector, distributor } = await world(t);
-    const retailer = await createActor(t, tenant, 'RETAILER');
+    const { farmer, processor, inspector, exporter } = await world(t);
     const farms: Batch[] = [];
     for (let i = 0; i < 200; i++) farms.push(await harvestLot(t, farmer, processor, i));
 
-    // Collector/mill pools the cherries — and keeps custody (no hand-off given).
+    // The mill pools the cherries (no collector: COLLECTION is optional) — and keeps custody.
     const merge = await t.ctx.lineageService.createTransformation(processor, {
       kind: 'MERGE',
       stage: 'PROCESSING',
       location: 'Đại lý Lộc Thành',
+      data: PROCESSING,
       inputs: farms.map((f) => ({ lotId: f.id, quantity: 1000 })),
       outputs: [{ productName: 'Cà phê quả tươi gom', productType: 'Cà phê quả tươi', quantity: 200_000, unit: 'kg' }],
     });
     expect(merge.anomalies).toHaveLength(0);
     expect(merge.outputs[0].assignedToActorId).toBe(processor.id);
 
-    // 200 t cherries → 40 t green beans (0.20 ≤ 0.22), handed to QC.
+    // 200 t cherries → 40 t green beans (0.20 within 0.15–0.23), handed to QC — who confirms receipt.
     const transform = await t.ctx.lineageService.createTransformation(processor, {
       kind: 'TRANSFORM',
       stage: 'PROCESSING',
@@ -72,26 +81,23 @@ describe('LineageService — end-to-end lineage (SPEC §3, WP4 acceptance)', () 
     });
     expect(transform.anomalies).toHaveLength(0);
     const green = transform.outputs[0];
+    expect(green.status).toBe('IN_TRANSIT');
+    await acceptHandOver(t, inspector, green.id);
     await t.ctx.supplyChainService.recordEvent(inspector, {
       batchId: green.id,
       stage: 'QUALITY_CHECK',
       location: 'Trung tâm kiểm định',
-      data: { result: 'PASS' },
-      assignNextTo: processor.id,
+      data: { result: 'PASS', moisture: 12.2 },
+      assignNextTo: exporter.id,
     });
-    await t.ctx.supplyChainService.recordEvent(processor, {
-      batchId: green.id,
-      stage: 'PACKAGING',
-      location: 'Nhà máy Bảo Lộc',
-      data: { packageType: 'BAG_60KG', packageCount: 666 },
-      assignNextTo: distributor.id,
-    });
+    await acceptHandOver(t, exporter, green.id);
 
-    // The exporter splits into three containers.
-    const split = await t.ctx.lineageService.createTransformation(distributor, {
+    // The exporter stuffs three containers.
+    const split = await t.ctx.lineageService.createTransformation(exporter, {
       kind: 'SPLIT',
-      stage: 'DISTRIBUTION',
+      stage: 'CONTAINER_STUFFING',
       location: 'Cảng Cát Lái',
+      data: STAGE_DATA.CONTAINER_STUFFING,
       inputs: [{ lotId: green.id, quantity: 40_000 }],
       outputs: [1, 2, 3].map((n) => ({
         productName: `Container ${n}`,
@@ -99,15 +105,14 @@ describe('LineageService — end-to-end lineage (SPEC §3, WP4 acceptance)', () 
         quantity: n === 3 ? 13_000 : 13_500,
         unit: 'kg',
       })),
-      assignNextTo: retailer.id,
     });
     expect(split.outputs).toHaveLength(3);
     expect(split.anomalies).toHaveLength(0);
 
     for (const container of split.outputs) {
       const started = Date.now();
-      const graph = await t.ctx.lineageService.lineage(distributor, container.id);
-      const fc = await t.ctx.plotService.originFeatures(distributor, container.id);
+      const graph = await t.ctx.lineageService.lineage(exporter, container.id);
+      const fc = await t.ctx.plotService.originFeatures(exporter, container.id);
       const elapsed = Date.now() - started;
       expect(new Set(graph.rootLotIds)).toEqual(new Set(farms.map((f) => f.id)));
       expect(fc.features).toHaveLength(200);
@@ -123,15 +128,16 @@ describe('LineageService — end-to-end lineage (SPEC §3, WP4 acceptance)', () 
     // Inputs are consumed; a fully consumed lot takes no further events.
     expect((await t.ctx.supplyChainService.getBatch(processor, farms[0].id)).consumedQuantity).toBe(1000);
     await expect(
-      t.ctx.supplyChainService.recordEvent(processor, { batchId: farms[0].id, stage: 'PROCESSING', location: 'x' }),
+      t.ctx.supplyChainService.recordEvent(processor, { batchId: farms[0].id, stage: 'PROCESSING', location: 'x', data: PROCESSING }),
     ).rejects.toThrow(/fully consumed/);
 
-    // A container's first event commits to its input's chain head at split time (SPEC §1.2).
+    // A container's first event commits to its input's chain head at split time (SPEC §1.2) —
+    // custody events included: TRANSFORM, TRANSFER_OUT, TRANSFER_ACCEPT, QC, TRANSFER_OUT, TRANSFER_ACCEPT.
     const greenAtSplit = (await t.ctx.traceService.verifyPublic(green.id)).events;
     const [genesis] = (await t.ctx.traceService.verifyPublic(split.outputs[0].id)).events;
     expect(genesis.kind).toBe('SPLIT');
     expect(genesis.links).toEqual([
-      expect.objectContaining({ lotId: green.id, quantity: 40_000, eventCount: 3, headHash: greenAtSplit[2].hash }),
+      expect.objectContaining({ lotId: green.id, quantity: 40_000, eventCount: 6, headHash: greenAtSplit[5].hash }),
     ]);
     expect(hashOfDisclosure(genesis.disclosure!)).toBe(genesis.hash);
   }, 180_000);
@@ -152,6 +158,7 @@ describe('LineageService — rules', () => {
       kind: 'TRANSFORM',
       stage: 'PROCESSING',
       location: 'x',
+      data: PROCESSING,
       inputs: [{ lotId: a.id, quantity: 1000 }],
       outputs: [{ productName: 'Nhân xanh', productType: 'Cà phê nhân xanh', quantity: 400, unit: 'kg' }], // 0.4 > 0.22
       assignNextTo: inspector.id,
@@ -167,6 +174,7 @@ describe('LineageService — rules', () => {
       kind: 'MERGE',
       stage: 'PROCESSING',
       location: 'x',
+      data: PROCESSING,
       inputs: [
         { lotId: a.id, quantity: 1000 },
         { lotId: b.id, quantity: 1000 },
@@ -185,6 +193,7 @@ describe('LineageService — rules', () => {
         kind: 'SPLIT',
         stage: 'PROCESSING',
         location: 'x',
+        data: PROCESSING,
         inputs: [{ lotId: a.id, quantity: 1001 }],
         outputs: [
           { productName: 'A', productType: 'Cà phê quả tươi', quantity: 500, unit: 'kg' },
@@ -198,6 +207,7 @@ describe('LineageService — rules', () => {
       kind: 'SPLIT',
       stage: 'PROCESSING',
       location: 'x',
+      data: PROCESSING,
       inputs: [{ lotId: a.id, quantity: 600 }],
       outputs: [
         { productName: 'A', productType: 'Cà phê quả tươi', quantity: 300, unit: 'kg' },
@@ -213,7 +223,7 @@ describe('LineageService — rules', () => {
   it('enforces shape rules: merge ≥ 2 → 1, split 1 → ≥ 2, type kept unless transforming, no duplicates', async () => {
     const t = getDb();
     const { processor, inspector, a, b } = await twoFarmLots(t);
-    const base = { stage: 'PROCESSING' as const, location: 'x', assignNextTo: inspector.id };
+    const base = { stage: 'PROCESSING' as const, location: 'x', data: PROCESSING, assignNextTo: inspector.id };
     const out = (type = 'Cà phê quả tươi', q = 100) => ({ productName: 'o', productType: type, quantity: q, unit: 'kg' });
     await expect(
       t.ctx.lineageService.createTransformation(processor, { ...base, kind: 'MERGE', inputs: [{ lotId: a.id, quantity: 1 }], outputs: [out()] }),
@@ -252,6 +262,7 @@ describe('LineageService — rules', () => {
       kind: 'MERGE' as const,
       stage: 'PROCESSING' as const,
       location: 'x',
+      data: PROCESSING,
       inputs: [
         { lotId: a.id, quantity: 1 },
         { lotId: b.id, quantity: 1 },
@@ -273,6 +284,7 @@ describe('LineageService — rules', () => {
       kind: 'MERGE',
       stage: 'PROCESSING',
       location: 'x',
+      data: PROCESSING,
       inputs: [
         { lotId: a.id, quantity: 1000 },
         { lotId: b.id, quantity: 1000 },
@@ -290,12 +302,13 @@ describe('LineageService — rules', () => {
 describe('Hand-off without recording a stage', () => {
   it('the mill keeps the transformed lot, then hands it to QC; it shows in both task queues accordingly', async () => {
     const t = getDb();
-    const { farmer, processor, inspector } = await world(t);
+    const { farmer, processor, inspector, exporter } = await world(t);
     const lot = await harvestLot(t, farmer, processor, 0);
     const r = await t.ctx.lineageService.createTransformation(processor, {
       kind: 'TRANSFORM',
       stage: 'PROCESSING',
       location: 'x',
+      data: PROCESSING,
       inputs: [{ lotId: lot.id, quantity: 1000 }],
       outputs: [{ productName: 'Nhân xanh', productType: 'Cà phê nhân xanh', quantity: 200, unit: 'kg' }],
     });
@@ -307,11 +320,20 @@ describe('Hand-off without recording a stage', () => {
     await expect(t.ctx.supplyChainService.handOff(inspector, green.id, inspector.id)).rejects.toThrow(/not been handed off/);
     await expect(t.ctx.supplyChainService.handOff(processor, green.id, farmer.id)).rejects.toThrow(/cannot handle stage/);
     const handed = await t.ctx.supplyChainService.handOff(processor, green.id, inspector.id);
-    expect(handed.assignedToActorId).toBe(inspector.id);
-    expect(handed.currentStage).toBe('PROCESSING');
+    // In transit until the inspector confirms: custody hasn't moved yet.
+    expect(handed).toMatchObject({ status: 'IN_TRANSIT', assignedToActorId: processor.id, currentStage: 'PROCESSING' });
+    expect((await t.ctx.supplyChainService.listIncomingTransfers(inspector)).map((x) => x.batchId)).toEqual([green.id]);
+    await acceptHandOver(t, inspector, green.id);
     expect((await t.ctx.supplyChainService.listPendingForActor(inspector)).map((b) => b.id)).toContain(green.id);
     expect((await t.ctx.supplyChainService.listPendingForActor(processor)).map((b) => b.id)).not.toContain(green.id);
-    await t.ctx.supplyChainService.recordEvent(inspector, { batchId: green.id, stage: 'QUALITY_CHECK', location: 'Lab', assignNextTo: processor.id });
+    await t.ctx.supplyChainService.recordEvent(inspector, {
+      batchId: green.id,
+      stage: 'QUALITY_CHECK',
+      location: 'Lab',
+      data: { result: 'PASS', moisture: 12 },
+      // After export QC comes container stuffing — the exporter's, not the mill's.
+      assignNextTo: exporter.id,
+    });
   });
 });
 

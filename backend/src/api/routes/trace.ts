@@ -5,10 +5,16 @@ import { TraceDirection, TraceService } from '../../services/traceService';
 import { requireAuth } from '../middleware/auth';
 import { asyncHandler } from '../middleware/error';
 import { validateBody } from '../middleware/validate';
-import { verificationLinkSchema } from '../../validation/schemas';
+import { importReceiptSchema, receiptLinkSchema, verificationLinkSchema } from '../../validation/schemas';
 import { z } from 'zod';
+import { SupplyChainService } from '../../services/supplyChainService';
 
-export function traceRoutes(traceService: TraceService, authService: AuthService, anchorInfo: AnchorInfo): Router {
+export function traceRoutes(
+  traceService: TraceService,
+  authService: AuthService,
+  anchorInfo: AnchorInfo,
+  supplyChainService: SupplyChainService,
+): Router {
   const router = Router();
 
   // Public — which chain/contract events are anchored on.
@@ -35,7 +41,35 @@ export function traceRoutes(traceService: TraceService, authService: AuthService
     }),
   );
 
+  // Public — the foreign buyer opens the receipt link the exporter sent...
+  router.get(
+    '/public/:batchId/receipt',
+    asyncHandler(async (req, res) => {
+      const token = typeof req.query.token === 'string' ? req.query.token : '';
+      res.json(await supplyChainService.receiptInfo(req.params.batchId, token));
+    }),
+  );
+
+  // ...and confirms what arrived. The token is the authorisation.
+  router.post(
+    '/public/:batchId/receipt',
+    validateBody(importReceiptSchema),
+    asyncHandler(async (req, res) => {
+      const { token, ...dto } = req.body as z.infer<typeof importReceiptSchema>;
+      res.status(201).json(await supplyChainService.recordImportReceipt(req.params.batchId, token, dto));
+    }),
+  );
+
   router.use(requireAuth(authService));
+
+  router.post(
+    '/:batchId/receipt-links',
+    validateBody(receiptLinkSchema),
+    asyncHandler(async (req, res) => {
+      const { importerName, days } = req.body as z.infer<typeof receiptLinkSchema>;
+      res.status(201).json(await supplyChainService.createReceiptLink(req.actor!, req.params.batchId, importerName, days));
+    }),
+  );
 
   router.post(
     '/:batchId/verification-links',

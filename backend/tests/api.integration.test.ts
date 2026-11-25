@@ -72,7 +72,7 @@ describe('API route wiring', () => {
     const create = await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
     const res = await request(app).get(`/api/trace/public/${create.body.id}`);
     expect(res.status).toBe(200);
     expect(res.body.stageCount).toBe(0);
@@ -83,7 +83,7 @@ describe('API route wiring', () => {
     const create = await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
     await request(app)
       .post('/api/events')
       .set('Authorization', `Bearer ${farmerToken}`)
@@ -93,7 +93,8 @@ describe('API route wiring', () => {
     expect(res.status).toBe(200);
     expect(res.body.access).toBe('public');
     expect(res.body.serverCheck.valid).toBe(true);
-    expect(res.body.events).toHaveLength(1);
+    // HARVEST, then its hand-over (waiting for the receiver) — both on the ledger.
+    expect(res.body.events.map((e: { kind: string }) => e.kind)).toEqual(['OBSERVE', 'TRANSFER_OUT']);
   });
 
   it('rejects a non-ADMIN role from recalling a batch', async () => {
@@ -101,7 +102,7 @@ describe('API route wiring', () => {
     const create = await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
 
     const recall = await request(app)
       .post(`/api/batches/${create.body.id}/recall`)
@@ -116,7 +117,7 @@ describe('API route wiring', () => {
     const create = await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
 
     const recall = await request(app)
       .post(`/api/batches/${create.body.id}/recall`)
@@ -139,7 +140,7 @@ describe('API route wiring', () => {
     const create = await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
 
     const recall = await request(app)
       .post(`/api/batches/${create.body.id}/recall`)
@@ -162,7 +163,7 @@ describe('API route wiring', () => {
     const create = await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${retailerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
 
     expect(create.status).toBe(403);
   });
@@ -270,7 +271,7 @@ describe('API route wiring', () => {
     const res = await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: -5, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: -5, unit: 'kg' });
     expect(res.status).toBe(400);
   });
 
@@ -279,7 +280,7 @@ describe('API route wiring', () => {
     await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
 
     const res = await request(app).get('/api/batches?page=1&pageSize=10').set('Authorization', `Bearer ${farmerToken}`);
     expect(res.status).toBe(200);
@@ -292,7 +293,7 @@ describe('API route wiring', () => {
     await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
 
     const res = await request(app).get('/api/batches/pending').set('Authorization', `Bearer ${farmerToken}`);
     expect(res.status).toBe(200);
@@ -304,7 +305,7 @@ describe('API route wiring', () => {
     const create = await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
 
     const randomProcessorToken = await joinViaInvite(app, adminToken, {
       name: 'Random Processor',
@@ -335,7 +336,7 @@ describe('API route wiring', () => {
     const create = await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
 
     // The processor can't touch it yet — HARVEST hasn't been handed to them.
     const tooEarly = await request(app)
@@ -357,6 +358,21 @@ describe('API route wiring', () => {
       .send({ batchId: create.body.id, stage: 'HARVEST', location: 'x', assignNextTo: processorId });
     expect(harvest.status).toBe(201);
 
+    // In transit: nobody records anything until the processor confirms receipt.
+    const notYet = await request(app)
+      .post('/api/events')
+      .set('Authorization', `Bearer ${processorToken}`)
+      .send({ batchId: create.body.id, stage: 'PROCESSING', location: 'x', data: { method: 'WET' } });
+    expect(notYet.status).toBe(409);
+    const inbox = await request(app).get('/api/transfers/incoming').set('Authorization', `Bearer ${processorToken}`);
+    expect(inbox.body.map((x: { batchId: string }) => x.batchId)).toEqual([create.body.id]);
+    const accept = await request(app)
+      .post(`/api/transfers/${inbox.body[0].id}/respond`)
+      .set('Authorization', `Bearer ${processorToken}`)
+      .send({ accept: true, receivedQuantity: 1 });
+    expect(accept.status).toBe(200);
+    expect(accept.body.batch).toMatchObject({ status: 'ACTIVE', assignedToActorId: processorId });
+
     // Now the processor (and only the processor) can record PROCESSING.
     const farmerLockedOut = await request(app)
       .post('/api/events')
@@ -364,10 +380,18 @@ describe('API route wiring', () => {
       .send({ batchId: create.body.id, stage: 'HARVEST', location: 'x' });
     expect(farmerLockedOut.status).toBe(403);
 
-    const processing = await request(app)
+    // The server checks the stage's fields: PROCESSING needs a method.
+    const missingField = await request(app)
       .post('/api/events')
       .set('Authorization', `Bearer ${processorToken}`)
       .send({ batchId: create.body.id, stage: 'PROCESSING', location: 'x', assignNextTo: admin.id });
+    expect(missingField.status).toBe(422);
+    expect(missingField.body.issues).toEqual([expect.objectContaining({ field: 'method', code: 'required' })]);
+
+    const processing = await request(app)
+      .post('/api/events')
+      .set('Authorization', `Bearer ${processorToken}`)
+      .send({ batchId: create.body.id, stage: 'PROCESSING', location: 'x', data: { method: 'WET' }, assignNextTo: admin.id });
     expect(processing.status).toBe(201);
   });
 
@@ -376,7 +400,7 @@ describe('API route wiring', () => {
     await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
 
     const res = await request(app).get('/api/batches/export?format=csv').set('Authorization', `Bearer ${farmerToken}`);
     expect(res.status).toBe(200);
@@ -392,7 +416,9 @@ describe('API route wiring', () => {
     const res = await request(app)
       .get('/api/batches/export?format=csv&origin=nowhere')
       .set('Authorization', `Bearer ${farmerToken}`);
-    expect(res.text).toBe('﻿"id","productName","productType","origin","quantity","unit","currentStage","isRecalled","createdAt"\r\n');
+    expect(res.text).toBe(
+      '﻿"id","productName","productType","origin","quantity","unit","quantityBase","baseUnit","currentStage","status","isRecalled","createdAt"\r\n',
+    );
   });
 
   it('exchanges the httpOnly refresh cookie for a new access token', async () => {
@@ -479,7 +505,7 @@ describe('API route wiring', () => {
     const create = await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
     // Recorded via ADMIN (exempt from the custody hand-off requirement) since
     // this test is about anomaly detection, not chain-of-custody enforcement —
     // after the first HARVEST hands off to a specific next actor, the
@@ -563,7 +589,7 @@ describe('API route wiring', () => {
     const create = await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
 
     const res = await request(app).get(`/api/actors/${farmer.id}`).set('Authorization', `Bearer ${farmerToken}`);
     expect(res.status).toBe(200);
@@ -575,7 +601,7 @@ describe('API route wiring', () => {
     const create = await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
     await request(app)
       .post(`/api/batches/${create.body.id}/recall`)
       .set('Authorization', `Bearer ${adminToken}`)
@@ -621,7 +647,7 @@ describe('API route wiring', () => {
     const create = await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
     const first = await request(app)
       .post(`/api/batches/${create.body.id}/recall`)
       .set('Authorization', `Bearer ${adminToken}`)
@@ -639,7 +665,7 @@ describe('API route wiring', () => {
     const create = await request(app)
       .post('/api/batches')
       .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ productName: 'X', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+      .send({ productName: 'X', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
     await request(app)
       .post('/api/events')
       .set('Authorization', `Bearer ${farmerToken}`)
@@ -648,7 +674,7 @@ describe('API route wiring', () => {
     const res = await request(app).get(`/api/trace/public/${create.body.id}/full`);
     expect(res.status).toBe(200);
     expect(res.body.serverCheck).toMatchObject({ valid: true, headMatches: true });
-    expect(res.body.events[0]).toMatchObject({ hashVersion: 3 });
+    expect(res.body.events[0]).toMatchObject({ hashVersion: 4 });
     // Nothing internal leaves the tenant on the public route.
     for (const field of ['tenantId', 'actorId', 'notes', 'data', 'salt', 'claimSalts']) {
       expect(res.body.events[0]).not.toHaveProperty(field);
@@ -676,7 +702,7 @@ describe('API route wiring', () => {
       const create = await request(app)
         .post('/api/batches')
         .set('Authorization', `Bearer ${farmerToken}`)
-        .send({ productName: 'Tenant A Batch', productType: 'x', origin: 'x', quantity: 1, unit: 'kg' });
+        .send({ productName: 'Tenant A Batch', productType: 'Nông sản', origin: 'x', quantity: 1, unit: 'kg' });
       expect(create.status).toBe(201);
 
       // A second tenant that has never heard of the first one — founded

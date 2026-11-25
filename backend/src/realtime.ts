@@ -1,5 +1,5 @@
 import { Server as SocketIOServer } from 'socket.io';
-import { Anomaly, Batch } from './domain/types';
+import { Anomaly, Batch, Transfer } from './domain/types';
 import { RealtimeEmitter } from './services/supplyChainService';
 
 /** Every actor's personal room — used to target a specific recipient without a broadcast. */
@@ -32,5 +32,11 @@ export class SocketRealtimeEmitter implements RealtimeEmitter {
   emitRecall(batch: Batch, recipientActorIds: string[]): void {
     const rooms = [oversightRoom(batch.tenantId), ...recipientActorIds.map((id) => actorRoom(batch.tenantId, id))];
     this.io?.to(rooms).emit('recall', batch);
+  }
+
+  /** A hand-over waiting for the receiver, or the receiver's answer back to the sender — personal, no oversight broadcast. */
+  emitTransfer(transfer: Transfer, recipientActorIds: string[]): void {
+    if (recipientActorIds.length === 0) return;
+    this.io?.to(recipientActorIds.map((id) => actorRoom(transfer.tenantId, id))).emit('transfer', transfer);
   }
 }

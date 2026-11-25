@@ -1,5 +1,5 @@
 import { ConflictError, ForbiddenError, NotFoundError } from '../src/errors';
-import { asAttacker, createActor, createTenant, sampleBatch, TestDb, useTestDatabase } from './helpers/testDb';
+import { asAttacker, createActor, createTenant, sampleBatch, step, TestDb, useTestDatabase } from './helpers/testDb';
 
 const getDb = useTestDatabase();
 
@@ -24,7 +24,7 @@ describe('StatsService (aggregated in SQL)', () => {
     const c = await svc.createBatch(admin, { ...sampleBatch, origin: 'Đắk Lắk' });
     await svc.recordEvent(farmer, { batchId: a.id, stage: 'HARVEST', location: 'x', assignNextTo: processor.id });
     await svc.recordEvent(admin, { batchId: c.id, stage: 'HARVEST', location: 'x' });
-    await svc.recordEvent(admin, { batchId: c.id, stage: 'PACKAGING', location: 'x' }); // STAGE_SKIPPED
+    await step(t, admin, c.id, 'PACKAGING'); // STAGE_SKIPPED (PROCESSING and the inspection)
     await svc.recallBatch(admin, b.id, 'test');
 
     // Noise in another tenant must not leak into any number.
@@ -37,7 +37,8 @@ describe('StatsService (aggregated in SQL)', () => {
       totalBatches: 3,
       activeBatches: 2,
       recalledBatches: 1,
-      totalEvents: 3,
+      // HARVEST + its pending hand-over, HARVEST + PACKAGING, and the RECALL — all ledger events.
+      totalEvents: 5,
       anomalyCount: 1,
       openAnomalyCount: 1,
     });
@@ -45,7 +46,8 @@ describe('StatsService (aggregated in SQL)', () => {
     const byStage = await stats.byStage(farmer.tenantId);
     expect(byStage.find((s) => s.stage === 'HARVEST')?.count).toBe(2);
     expect(byStage.find((s) => s.stage === 'PACKAGING')?.count).toBe(1);
-    expect(byStage).toHaveLength(6);
+    // Stage records only (custody events don't count), stages in display order.
+    expect(byStage.map((s) => s.stage)).toEqual(['HARVEST', 'PACKAGING']);
 
     const today = new Date().toISOString().slice(0, 10);
     expect(await stats.byDay(farmer.tenantId)).toEqual([{ date: today, count: 3 }]);
@@ -56,24 +58,28 @@ describe('StatsService (aggregated in SQL)', () => {
     ]);
   });
 
-  it('flags batches with no activity for days as stalled — never recalled or finished ones', async () => {
+  it('flags batches with no activity for days as stalled — never recalled, finished or in-transit ones', async () => {
     const t = getDb();
     const { farmer, admin, processor } = await world(t);
     const svc = t.ctx.supplyChainService;
 
     const stuck = await svc.createBatch(farmer, sampleBatch);
-    await svc.recordEvent(farmer, { batchId: stuck.id, stage: 'HARVEST', location: 'x', assignNextTo: processor.id });
+    await step(t, farmer, stuck.id, 'HARVEST', { assignNextTo: processor });
     const fresh = await svc.createBatch(farmer, sampleBatch);
     const recalled = await svc.createBatch(farmer, sampleBatch);
     await svc.recallBatch(admin, recalled.id, 'x');
     const untouched = await svc.createBatch(farmer, sampleBatch);
+    // Handed over and never answered: not "stalled" but an overdue hand-over.
+    const waiting = await svc.createBatch(farmer, sampleBatch);
+    await svc.recordEvent(farmer, { batchId: waiting.id, stage: 'HARVEST', location: 'x', assignNextTo: processor.id });
 
     // Age everything except `fresh` past the threshold, bypassing the append-only ledger guard as the owner.
     const client = await t.ownerPool.connect();
     try {
       await client.query('SET session_replication_role = replica');
-      await client.query("UPDATE trace_events SET timestamp = now() - interval '5 days'");
+      await client.query("UPDATE trace_events SET timestamp = now() - interval '5 days', occurred_at = now() - interval '5 days'");
       await client.query("UPDATE batches SET created_at = now() - interval '6 days' WHERE id <> $1", [fresh.id]);
+      await client.query("UPDATE transfers SET created_at = now() - interval '3 days'");
     } finally {
       await client.query('RESET session_replication_role');
       client.release();
@@ -83,6 +89,9 @@ describe('StatsService (aggregated in SQL)', () => {
     expect(attention.stalledBatches.map((b) => b.id)).toEqual([untouched.id, stuck.id]);
     expect(attention.stalledCount).toBe(2);
     expect(attention.stalledBatches[1].lastEventAt).toBeInstanceOf(Date);
+    // stuck's hand-over was answered; only waiting's is still pending after 3 days.
+    expect(attention.overdueTransferCount).toBe(1);
+
   });
 
   it('filters the batch list by current stage, with NONE for not-yet-started batches', async () => {
@@ -136,7 +145,7 @@ describe('AdminService', () => {
     const { farmer, processor, admin } = await world(t);
     const svc = t.ctx.supplyChainService;
     const created = await svc.createBatch(farmer, sampleBatch);
-    await svc.recordEvent(farmer, { batchId: created.id, stage: 'HARVEST', location: 'x', assignNextTo: processor.id });
+    await step(t, farmer, created.id, 'HARVEST', { assignNextTo: processor }); // handed over and accepted
     await svc.createBatch(admin, sampleBatch); // unrelated to the processor
 
     const detail = await t.ctx.adminService.getActorDetail(processor.id, admin);
@@ -186,8 +195,8 @@ describe('AdminService', () => {
       const truncated = await svc.createBatch(w.admin, { ...sampleBatch, productName: 'truncated' });
       const clean = await svc.createBatch(w.admin, { ...sampleBatch, productName: 'clean' });
       for (const b of [edited, truncated, clean]) {
-        await svc.recordEvent(w.admin, { batchId: b.id, stage: 'HARVEST', location: 'x' });
-        await svc.recordEvent(w.admin, { batchId: b.id, stage: 'PROCESSING', location: 'y' });
+        await step(t, w.admin, b.id, 'HARVEST', { location: 'x' });
+        await step(t, w.admin, b.id, 'PROCESSING', { location: 'y' });
       }
       return { ...w, edited, truncated, clean };
     }

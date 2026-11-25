@@ -1,7 +1,11 @@
 import { NextFunction, Request, Response } from 'express';
-import { ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from '../../errors';
+import { ConflictError, ForbiddenError, NotFoundError, UnauthorizedError, ValidationError } from '../../errors';
 
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
+  if (err instanceof ValidationError) {
+    res.status(422).json({ error: err.message, issues: err.issues });
+    return;
+  }
   if (err instanceof NotFoundError) {
     res.status(404).json({ error: err.message });
     return;

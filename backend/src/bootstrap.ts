@@ -11,6 +11,8 @@ import { PostgresActorRepo } from './repository/postgres/actorRepo';
 import { PostgresAnomalyRepo } from './repository/postgres/anomalyRepo';
 import { PostgresAuditLogRepo } from './repository/postgres/auditLogRepo';
 import { PostgresBatchRepo } from './repository/postgres/batchRepo';
+import { PostgresCatalogRepo } from './repository/postgres/catalogRepo';
+import { PostgresCustodyRepo } from './repository/postgres/custodyRepo';
 import { PostgresEventRepo } from './repository/postgres/eventRepo';
 import { PostgresInvitationRepo } from './repository/postgres/invitationRepo';
 import { PostgresLineageRepo } from './repository/postgres/lineageRepo';
@@ -22,6 +24,7 @@ import { PostgresTenantRepo } from './repository/postgres/tenantRepo';
 import { seedSampleBatches } from './sampleData';
 import { AdminService } from './services/adminService';
 import { AuthOptions, AuthService } from './services/authService';
+import { CatalogService } from './services/catalogService';
 import { StatsService } from './services/statsService';
 import { SupplyChainService } from './services/supplyChainService';
 import { TraceService } from './services/traceService';
@@ -53,6 +56,7 @@ export interface AppContext {
   adminService: AdminService;
   lineageService: LineageService;
   plotService: PlotService;
+  catalogService: CatalogService;
   realtime: SocketRealtimeEmitter;
   anchorStore: AnchorStore;
   anchorWorker?: AnchorWorker;
@@ -75,10 +79,22 @@ export function createContext(db: Database, config: AppConfig): AppContext {
   const anchorStore = new AnchorStore(db);
   const plotRepo = new PostgresPlotRepo(db);
   const lineageRepo = new PostgresLineageRepo(db);
-  const lineageService = new LineageService(db, { batchRepo, eventRepo, anomalyRepo, auditLogRepo, actorRepo, lineageRepo });
+  const catalogRepo = new PostgresCatalogRepo(db);
+  const custodyRepo = new PostgresCustodyRepo(db);
   const organizationOf = async (actorId: string) => (await actorRepo.findById(actorId))?.organization ?? '';
 
   const realtime = new SocketRealtimeEmitter();
+  const supplyChainService = new SupplyChainService(
+    db,
+    { batchRepo, eventRepo, anomalyRepo, auditLogRepo, actorRepo, plotRepo, lineageRepo, catalogRepo, custodyRepo },
+    realtime,
+    config.jwtSecret,
+  );
+  const lineageService = new LineageService(
+    db,
+    { batchRepo, eventRepo, anomalyRepo, auditLogRepo, actorRepo, lineageRepo, catalogRepo, custodyRepo },
+    supplyChainService,
+  );
 
   const anchorWorker = config.anchor
     ? new AnchorWorker(anchorStore, new ViemAnchorChain(config.anchor), {
@@ -104,22 +120,19 @@ export function createContext(db: Database, config: AppConfig): AppContext {
       config.jwtSecret,
       config.auth,
     ),
-    supplyChainService: new SupplyChainService(
-      db,
-      { batchRepo, eventRepo, anomalyRepo, auditLogRepo, actorRepo, plotRepo, lineageRepo },
-      realtime,
-    ),
+    supplyChainService,
     lineageService,
+    catalogService: new CatalogService(db, catalogRepo, auditLogRepo),
     plotService: new PlotService(db, plotRepo, auditLogRepo, lineageService, organizationOf),
     traceService: new TraceService(
       db,
-      { batchRepo, eventRepo, anomalyRepo, actorRepo },
+      { batchRepo, eventRepo, anomalyRepo, actorRepo, catalogRepo },
       config.legacyLedgerKey,
       anchorStore,
       config.jwtSecret,
       lineageService,
     ),
-    statsService: new StatsService(db, statsRepo, new PostgresReportRepo(db)),
+    statsService: new StatsService(db, statsRepo, new PostgresReportRepo(db, catalogRepo)),
     adminService: new AdminService(
       db,
       { tenantRepo, actorRepo, eventRepo, batchRepo, anomalyRepo, auditLogRepo },
@@ -140,8 +153,12 @@ const DEMO_TENANT_SLUG = 'demo-tenant';
 
 const DEMO_ACCOUNTS: Array<{ name: string; email: string; role: ActorRole; organization: string }> = [
   { name: 'Nguyễn Văn Nông', email: 'farmer@demo.com', role: 'FARMER', organization: 'Nông trại Đà Lạt' },
+  { name: "K'Bông", email: 'farmer2@demo.com', role: 'FARMER', organization: "Hộ K'Bông – Lạc Dương" },
+  { name: 'Đỗ Văn Thu Mua', email: 'collector@demo.com', role: 'COLLECTOR', organization: 'Đại lý thu mua Cầu Đất' },
   { name: 'Trần Thị Chế Biến', email: 'processor@demo.com', role: 'PROCESSOR', organization: 'Xưởng chế biến An Giang' },
+  { name: 'Vũ Thị Kho', email: 'warehouse@demo.com', role: 'WAREHOUSE', organization: 'Kho ngoại quan Bình Dương' },
   { name: 'Lê Văn Kiểm Định', email: 'inspector@demo.com', role: 'INSPECTOR', organization: 'Trung tâm kiểm định VN' },
+  { name: 'Ngô Văn Xuất Khẩu', email: 'exporter@demo.com', role: 'EXPORTER', organization: 'Công ty XNK Cà phê Lâm Đồng' },
   { name: 'Phạm Thị Phân Phối', email: 'distributor@demo.com', role: 'DISTRIBUTOR', organization: 'Công ty logistics ABC' },
   { name: 'Hoàng Văn Bán Lẻ', email: 'retailer@demo.com', role: 'RETAILER', organization: 'Siêu thị XYZ' },
   { name: 'Admin Hệ Thống', email: 'admin@demo.com', role: 'ADMIN', organization: 'TraceChain' },
@@ -179,7 +196,7 @@ export async function seedDemoData(ctx: AppContext): Promise<void> {
     if (!identity || identity.tenantId !== demoTenantId) return null;
     return ctx.db.withTenant(demoTenantId, () => actorRepo.findById(identity.actorId));
   };
-  await seedSampleBatches(ctx.supplyChainService, demoTenantId, findActorByEmail);
+  await seedSampleBatches(ctx, demoTenantId, findActorByEmail);
 }
 
 /**

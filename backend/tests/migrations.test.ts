@@ -92,6 +92,16 @@ describe('migrator', () => {
          VALUES ($1, 'Cà phê', 'Nông sản', 'Đắk Lắk', 100, 'kg', $2, $3, 'PROCESSING')`,
         [batchId, actorId, tenantId],
       );
+      // Two more old lots: an alias that maps ("Lúa gạo" → Gạo, counted in "bao" — known for rice),
+      // and a name the catalog doesn't know, which must wait for an admin instead of being guessed.
+      const riceId = uuidv4();
+      const unknownId = uuidv4();
+      await pool.query(
+        `INSERT INTO batches (id, product_name, product_type, origin, quantity, unit, created_by, tenant_id)
+         VALUES ($1, 'Gạo', 'Lúa gạo', 'Sóc Trăng', 20, 'bao', $3, $4),
+                ($2, 'Thứ lạ', 'Hàng tự gõ', 'x', 3, 'thùng', $3, $4)`,
+        [riceId, unknownId, actorId, tenantId],
+      );
       const legacy: TraceEvent[] = [];
       for (const [seq, stage] of (['HARVEST', 'PROCESSING'] as const).entries()) {
         const unhashed = {
@@ -107,6 +117,7 @@ describe('migrator', () => {
         };
         const event: TraceEvent = {
           ...unhashed,
+          occurredAt: unhashed.timestamp,
           id: uuidv4(),
           tenantId,
           hashVersion: 1,
@@ -128,7 +139,19 @@ describe('migrator', () => {
 
       // ── Upgrade ──
       const result = await migrate(pool);
-      expect(result.applied.map((n) => n.slice(0, 3))).toEqual(['006', '007', '008', '009', '010', '011', '012', '013', '014']);
+      expect(result.applied.map((n) => n.slice(0, 3))).toEqual([
+        '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019',
+      ]);
+
+      // 015: catalog mapping — exact names and curated aliases only.
+      const mapped = await pool.query(
+        `SELECT b.id, b.product_type, pt.code, b.unit_factor::float AS factor, b.quantity_base::float AS base, b.status, w.code AS workflow
+           FROM batches b LEFT JOIN product_types pt ON pt.id = b.product_type_id JOIN workflow_templates w ON w.id = b.workflow_id`,
+      );
+      const byId = new Map(mapped.rows.map((r) => [r.id, r]));
+      expect(byId.get(batchId)).toMatchObject({ product_type: 'Nông sản khác', code: 'OTHER_PRODUCE', factor: 1, base: 100, workflow: 'GENERIC_RETAIL', status: 'ACTIVE' });
+      expect(byId.get(riceId)).toMatchObject({ product_type: 'Gạo', code: 'RICE_MILLED', factor: 50, base: 1000 });
+      expect(byId.get(unknownId)).toMatchObject({ product_type: 'Hàng tự gõ', code: null, factor: null, base: null });
 
       const batch = await pool.query('SELECT head_hash, event_count FROM batches WHERE id = $1', [batchId]);
       expect(batch.rows[0]).toEqual({ head_hash: legacy[1].hash, event_count: 2 });
@@ -152,8 +175,8 @@ describe('migrator', () => {
       await expect(
         pool.query(
           `INSERT INTO trace_events (id, batch_id, tenant_id, stage, actor_id, location, data, hash, prev_hash,
-                                     sequence_number, hash_version, salt)
-           VALUES ($1, $2, $3, 'QUALITY_CHECK', $4, 'x', '{}', $5, $6, 2, 2, $7)`,
+                                     sequence_number, hash_version, salt, timestamp, occurred_at)
+           VALUES ($1, $2, $3, 'QUALITY_CHECK', $4, 'x', '{}', $5, $6, 2, 2, $7, now(), now())`,
           [uuidv4(), batchId, tenantId, actorId, 'c'.repeat(64), legacy[1].hash, 'a'.repeat(64)],
         ),
       ).resolves.toBeDefined();

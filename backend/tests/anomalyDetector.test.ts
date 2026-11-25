@@ -9,6 +9,7 @@ function makeEvent(stage: SupplyChainStage, overrides: Partial<TraceEvent> = {})
     stage,
     actorId: 'actor-1',
     timestamp: new Date(),
+    occurredAt: new Date(),
     location: 'Somewhere',
     data: {},
     tenantId: 'tenant-1',

@@ -1,12 +1,13 @@
 import jwt from 'jsonwebtoken';
 import { AnchorStore, EventAnchorProof } from '../anchor/anchorStore';
 import { Database } from '../db/database';
+import { publicKeys } from '../domain/fieldSchema';
 import {
   Actor,
   Batch,
   EventKind,
   EventLink,
-  PUBLIC_EVENT_FIELDS,
+  isStageEvent,
   PublicJourneyStep,
   PublicOrigins,
   PublicTrace,
@@ -17,8 +18,8 @@ import {
 import { ForbiddenError } from '../errors';
 import {
   ChainProblem,
-  DisclosureV3,
-  discloseV3,
+  disclose,
+  Disclosure,
   GENESIS_HASH,
   hashOfDisclosure,
   publicClaimNames,
@@ -26,6 +27,7 @@ import {
   VerifyOptions,
 } from '../ledger/hashChain';
 import { IActorRepo, IAnomalyRepo, IBatchRepo, IEventRepo } from '../repository/interfaces';
+import { PostgresCatalogRepo } from '../repository/postgres/catalogRepo';
 import { LineageService } from './lineageService';
 import { NotFoundError } from './supplyChainService';
 
@@ -36,13 +38,34 @@ export interface TraceRepos {
   eventRepo: IEventRepo;
   anomalyRepo: IAnomalyRepo;
   actorRepo: IActorRepo;
+  catalogRepo: PostgresCatalogRepo;
 }
 
-/** Only the whitelisted, scalar facts of an event may leave the tenant. */
-function publicDetails(event: TraceEvent): PublicJourneyStep['details'] {
+/**
+ * Public data keys of events written before field schemas existed (the old
+ * PUBLIC_EVENT_FIELDS) — they keep disclosing exactly what they used to.
+ */
+const LEGACY_PUBLIC_KEYS: Record<string, string[]> = {
+  HARVEST: ['harvestDate', 'variety', 'cultivation'],
+  PROCESSING: ['method'],
+  QUALITY_CHECK: ['result', 'grade', 'certificateNo'],
+  PACKAGING: ['packageType', 'expiryDate'],
+  DISTRIBUTION: ['destination'],
+  RETAIL: ['storeName', 'shelfDate'],
+};
+
+/** Public data keys of custody/status events: why a lot was recalled or held is the consumer's business; who got it is not. */
+const CUSTODY_PUBLIC_KEYS: Partial<Record<EventKind, string[]>> = {
+  RECALL: ['reason'],
+  HOLD: ['reason'],
+  RELEASE: ['reason'],
+  DISPOSE: ['method', 'recordNo'],
+};
+
+function pick(data: Record<string, unknown>, keys: string[]): PublicJourneyStep['details'] {
   const details: PublicJourneyStep['details'] = {};
-  for (const key of PUBLIC_EVENT_FIELDS[event.stage]) {
-    const value = event.data[key];
+  for (const key of keys) {
+    const value = data[key];
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') details[key] = value;
   }
   return details;
@@ -59,13 +82,16 @@ export interface VerificationEvent {
   sequenceNumber: number;
   stage: SupplyChainStage;
   kind: EventKind;
+  /** When it was recorded. */
   timestamp: Date;
+  /** When it happened (declared) — committed by v4 hashes, equal to `timestamp` before. */
+  occurredAt: Date;
   hash: string;
   prevHash: string;
-  hashVersion: 1 | 2 | 3;
+  hashVersion: 1 | 2 | 3 | 4;
   links: EventLink[];
-  /** v3: envelope + opened claims + hidden commitments. In full access every claim is opened. */
-  disclosure?: DisclosureV3;
+  /** v3/v4: envelope + opened claims + hidden commitments. In full access every claim is opened. */
+  disclosure?: Disclosure;
   /** v2 in full access only: the whole event and its salt. */
   contentV2?: { actorId: string; location: string; notes: string | null; data: Record<string, unknown>; salt: string };
   anchor?: Omit<EventAnchorProof, 'eventId'>;
@@ -101,6 +127,27 @@ export class TraceService {
     private readonly tokenSecret: string,
     private readonly lineage?: LineageService,
   ) {}
+
+  /** The data keys of an event that may leave the tenant: its field schema's public ones (or the legacy list, for older events). */
+  private async publicDataKeys(event: TraceEvent, categoryCode: string | null): Promise<string[]> {
+    if (!isStageEvent(event.kind)) return CUSTODY_PUBLIC_KEYS[event.kind] ?? [];
+    if (event.fieldSchemaId) return publicKeys((await this.repos.catalogRepo.schemaById(event.fieldSchemaId)) ?? null);
+    const current = publicKeys(await this.repos.catalogRepo.currentSchema(categoryCode, event.stage));
+    return [...new Set([...(LEGACY_PUBLIC_KEYS[event.stage] ?? []), ...current])];
+  }
+
+  private async categoryOf(batch: Batch): Promise<string | null> {
+    return batch.productTypeId ? ((await this.repos.catalogRepo.productTypeById(batch.productTypeId))?.categoryCode ?? null) : null;
+  }
+
+  /** Lots this one was made from that have since been recalled. */
+  private async recalledInputs(batch: Batch): Promise<PublicTrace['recalledInputs']> {
+    if (!this.lineage) return [];
+    const graph = await this.lineage.lineageInScope(batch.id, batch.tenantId);
+    const upstreamIds = [...new Set(graph.upstream.map((e) => e.fromLotId))];
+    const recalled = (await this.repos.batchRepo.findByIds(upstreamIds)).filter((b) => b.status === 'RECALLED');
+    return recalled.map((b) => ({ productName: b.productName, reason: b.recallReason }));
+  }
 
   /** Consumer-safe summary of what fed a lot: counts, regions, producer organizations — no lot ids, no people. */
   private async publicOrigins(batch: Batch): Promise<PublicOrigins | undefined> {
@@ -181,29 +228,40 @@ export class TraceService {
         const actor = await this.repos.actorRepo.findById(actorId);
         organizations.set(actorId, actor?.organization ?? '');
       }
-      const journey: PublicJourneyStep[] = events.map((e) => ({
-        stage: e.stage,
-        timestamp: e.timestamp,
-        location: e.location,
-        organization: organizations.get(e.actorId) ?? '',
-        details: publicDetails(e),
-      }));
+      const category = await this.categoryOf(batch);
+      const journey: PublicJourneyStep[] = [];
+      for (const e of events) {
+        journey.push({
+          stage: e.stage,
+          kind: e.kind,
+          timestamp: e.timestamp,
+          occurredAt: e.occurredAt,
+          location: e.location,
+          organization: organizations.get(e.actorId) ?? '',
+          details: pick(e.data, await this.publicDataKeys(e, category)),
+          fieldSchemaId: e.fieldSchemaId,
+        });
+      }
 
       return {
         batch: {
           id: batch.id,
           productName: batch.productName,
           productType: batch.productType,
+          productTypeId: batch.productTypeId,
           origin: batch.origin,
           currentStage: batch.currentStage,
+          status: batch.status,
           isRecalled: batch.isRecalled,
           recallReason: batch.recallReason,
+          workflowId: batch.workflowId,
         },
-        stageCount: new Set(events.map((e) => e.stage)).size,
+        stageCount: new Set(events.filter((e) => isStageEvent(e.kind)).map((e) => e.stage)).size,
         isValid: valid,
         hasAnomalies: anomalies.some((a) => !a.resolved),
         journey,
         origins: await this.publicOrigins(batch),
+        recalledInputs: await this.recalledInputs(batch),
       };
     });
   }
@@ -248,29 +306,32 @@ export class TraceService {
       const { access, expiresAt } = this.accessFor(batch, token);
       const events = await this.repos.eventRepo.findByBatchId(batchId);
       const proofs = await this.anchorStore.proofsForEvents(events.map((e) => e.id));
+      const category = await this.categoryOf(batch);
 
-      const out: VerificationEvent[] = events.map((e) => {
+      const out: VerificationEvent[] = [];
+      for (const e of events) {
         const base: VerificationEvent = {
           id: e.id,
           sequenceNumber: e.sequenceNumber,
           stage: e.stage,
           kind: e.kind,
           timestamp: e.timestamp,
+          occurredAt: e.occurredAt,
           hash: e.hash,
           prevHash: e.prevHash,
           hashVersion: e.hashVersion,
           links: e.links,
         };
-        if (e.hashVersion === 3 && e.claimSalts) {
-          const visible = publicClaimNames(e.stage);
-          base.disclosure = discloseV3(e, e.claimSalts, (name) => access === 'full' || visible.has(name));
+        if ((e.hashVersion === 3 || e.hashVersion === 4) && e.claimSalts) {
+          const visible = publicClaimNames(await this.publicDataKeys(e, category));
+          base.disclosure = disclose(e, e.claimSalts, (name) => access === 'full' || visible.has(name), e.hashVersion);
         } else if (e.hashVersion === 2 && access === 'full' && e.salt) {
           base.contentV2 = { actorId: e.actorId, location: e.location, notes: e.notes ?? null, data: e.data, salt: e.salt };
         }
         const proof = proofs.get(e.id);
         if (proof) base.anchor = { leafIndex: proof.leafIndex, proof: proof.proof, anchor: proof.anchor };
-        return base;
-      });
+        out.push(base);
+      }
 
       return {
         access,

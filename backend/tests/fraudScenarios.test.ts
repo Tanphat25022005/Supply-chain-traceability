@@ -1,9 +1,9 @@
 import { AnchorWorker } from '../src/anchor/anchorWorker';
 import { TraceEvent } from '../src/domain/types';
-import { computeEventHashV3, hashOfDisclosure } from '../src/ledger/hashChain';
+import { computeEventHashV4, hashOfDisclosure } from '../src/ledger/hashChain';
 import { buildMerkleTree, verifyInclusion } from '../src/ledger/merkle';
 import { FakeChain } from './helpers/fakeChain';
-import { asAttacker, createActor, createTenant, TestDb, useTestDatabase } from './helpers/testDb';
+import { asAttacker, createActor, createTenant, step, TestDb, useTestDatabase } from './helpers/testDb';
 
 /**
  * WP7 — the fraud scenarios from docs/PHASE1.md, each checked the way an
@@ -25,20 +25,17 @@ async function anchoredBatch(t: TestDb) {
     quantity: 1000,
     unit: 'kg',
   });
-  await t.ctx.supplyChainService.recordEvent(farmer, { batchId: batch.id, stage: 'HARVEST', location: 'Cầu Đất', assignNextTo: processor.id });
-  await t.ctx.supplyChainService.recordEvent(processor, { batchId: batch.id, stage: 'PROCESSING', location: 'Xưởng', assignNextTo: inspector.id });
-  await t.ctx.supplyChainService.recordEvent(inspector, {
-    batchId: batch.id,
-    stage: 'QUALITY_CHECK',
-    location: 'Lab',
-    data: { result: 'FAIL' },
-    assignNextTo: processor.id,
-  });
+  await step(t, farmer, batch.id, 'HARVEST', { location: 'Cầu Đất', data: { variety: 'ARABICA' }, assignNextTo: processor });
+  await step(t, processor, batch.id, 'PROCESSING', { location: 'Xưởng', assignNextTo: inspector });
+  // The failed inspection is the last event: HARVEST, hand-over ×2, PROCESSING, hand-over ×2, QC.
+  await step(t, inspector, batch.id, 'QUALITY_CHECK', { location: 'Lab', data: { result: 'FAIL', moisture: 14.5 } });
   const w = new AnchorWorker(t.ctx.anchorStore, chain, { maxLeaves: 100, confirmations: 1, receiptTimeoutMs: 10, resubmitAfterMs: 60_000 });
   await w.tick();
   await w.tick();
   return { chain, batch, inspector };
 }
+
+const QC_INDEX = 6;
 
 /** What the browser verifier concludes for one event: content recomputes AND its proof leads to a root the chain has. */
 async function outsideVerdict(t: TestDb, batchId: string, chain: FakeChain) {
@@ -59,20 +56,21 @@ describe('Fraud scenarios (WP7)', () => {
     const { chain, batch } = await anchoredBatch(t);
     const v = await outsideVerdict(t, batch.id, chain);
     expect(v.serverCheck.valid).toBe(true);
-    expect(v.perEvent).toEqual([
-      { content: true, anchored: true },
-      { content: true, anchored: true },
-      { content: true, anchored: true },
-    ]);
+    expect(v.perEvent).toHaveLength(QC_INDEX + 1);
+    expect(v.perEvent.every((e) => e.content === true && e.anchored === true)).toBe(true);
   });
 
   it('editing a value in the database is caught even by the public verifier', async () => {
     const t = getDb();
     const { chain, batch } = await anchoredBatch(t);
-    await asAttacker(t, `UPDATE trace_events SET data = '{"result":"PASS"}' WHERE batch_id = $1 AND stage = 'QUALITY_CHECK'`, [batch.id]);
+    await asAttacker(
+      t,
+      `UPDATE trace_events SET data = '{"result":"PASS","moisture":14.5}' WHERE batch_id = $1 AND stage = 'QUALITY_CHECK' AND kind = 'OBSERVE'`,
+      [batch.id],
+    );
     const v = await outsideVerdict(t, batch.id, chain);
-    expect(v.serverCheck).toMatchObject({ valid: false, problem: 'DISCLOSURE_MISMATCH', brokenAtIndex: 2 });
-    expect(v.perEvent[2].content).toBe(false);
+    expect(v.serverCheck).toMatchObject({ valid: false, problem: 'DISCLOSURE_MISMATCH', brokenAtIndex: QC_INDEX });
+    expect(v.perEvent[QC_INDEX].content).toBe(false);
   });
 
   it('a DB owner who rewrites a result AND recomputes every hash, link and head still fails — only against the blockchain', async () => {
@@ -81,15 +79,16 @@ describe('Fraud scenarios (WP7)', () => {
 
     // The attacker has everything the server has: rows, salts, the hash spec.
     const rows = await t.ownerPool.query(
-      `SELECT id, batch_id, tenant_id, stage, actor_id, timestamp, location, notes, data, prev_hash, sequence_number, kind, links, claim_salts
+      `SELECT id, batch_id, tenant_id, stage, actor_id, timestamp, occurred_at, location, notes, data, prev_hash, sequence_number, kind, links, claim_salts
          FROM trace_events WHERE batch_id = $1 ORDER BY sequence_number`,
       [batch.id],
     );
     let prev = '0'.repeat(64);
     for (const r of rows.rows) {
-      const data = r.stage === 'QUALITY_CHECK' ? { result: 'PASS' } : r.data; // the lie: failed QC becomes a pass
-      const e = { batchId: r.batch_id, stage: r.stage, actorId: r.actor_id, timestamp: r.timestamp, location: r.location, notes: r.notes ?? undefined, data, prevHash: prev, sequenceNumber: r.sequence_number, kind: r.kind, links: r.links } as TraceEvent;
-      const hash = computeEventHashV3(e, r.claim_salts);
+      // The lie: the failed QC becomes a pass.
+      const data = r.stage === 'QUALITY_CHECK' && r.kind === 'OBSERVE' ? { ...r.data, result: 'PASS' } : r.data;
+      const e = { batchId: r.batch_id, stage: r.stage, actorId: r.actor_id, timestamp: r.timestamp, occurredAt: r.occurred_at, location: r.location, notes: r.notes ?? undefined, data, prevHash: prev, sequenceNumber: r.sequence_number, kind: r.kind, links: r.links } as TraceEvent;
+      const hash = computeEventHashV4(e, r.claim_salts);
       await asAttacker(t, 'UPDATE trace_events SET data = $2, prev_hash = $3, hash = $4 WHERE id = $1', [r.id, JSON.stringify(data), prev, hash]);
       prev = hash;
     }
@@ -111,15 +110,15 @@ describe('Fraud scenarios (WP7)', () => {
     expect(v.serverCheck.valid).toBe(true);
     expect(v.perEvent.every((e) => e.content === true)).toBe(true);
     // ...but the root it now presents was never anchored: the chain exposes the rewrite.
-    expect(v.perEvent.map((e) => e.anchored)).toEqual([false, false, false]);
+    expect(v.perEvent.every((e) => e.anchored === false)).toBe(true);
     expect(await chain.getAnchor(tree.root)).toBeNull();
   });
 
   it('deleting the tail (hiding the failed QC) is caught by the recorded head', async () => {
     const t = getDb();
     const { chain, batch } = await anchoredBatch(t);
-    await asAttacker(t, `DELETE FROM anchor_leaves WHERE event_id IN (SELECT id FROM trace_events WHERE batch_id = $1 AND sequence_number = 2)`, [batch.id]);
-    await asAttacker(t, 'DELETE FROM trace_events WHERE batch_id = $1 AND sequence_number = 2', [batch.id]);
+    await asAttacker(t, `DELETE FROM anchor_leaves WHERE event_id IN (SELECT id FROM trace_events WHERE batch_id = $1 AND sequence_number = ${QC_INDEX})`, [batch.id]);
+    await asAttacker(t, `DELETE FROM trace_events WHERE batch_id = $1 AND sequence_number = ${QC_INDEX}`, [batch.id]);
     const v = await outsideVerdict(t, batch.id, chain);
     expect(v.serverCheck).toMatchObject({ valid: false, problem: 'HEAD_MISMATCH' });
   });
@@ -136,11 +135,12 @@ describe('Fraud scenarios (WP7)', () => {
       quantity: 1,
       unit: 'tấn',
     });
-    await t.ctx.supplyChainService.recordEvent(farmer, { batchId: lot.id, stage: 'HARVEST', location: 'x', assignNextTo: processor.id });
+    await step(t, farmer, lot.id, 'HARVEST', { data: { variety: 'ROBUSTA' }, assignNextTo: processor });
     const r = await t.ctx.lineageService.createTransformation(processor, {
       kind: 'TRANSFORM',
       stage: 'PROCESSING',
       location: 'x',
+      data: { method: 'DRY' },
       inputs: [{ lotId: lot.id, quantity: 1 }],
       outputs: [{ productName: 'Nhân xanh', productType: 'Cà phê nhân xanh', quantity: 600, unit: 'kg' }],
     });

@@ -2,7 +2,6 @@ import { Database } from '../db/database';
 import {
   AttentionSummary,
   STALLED_AFTER_DAYS,
-  STAGE_ORDER,
   StatsByDay,
   StatsByOrigin,
   StatsByStage,
@@ -27,7 +26,7 @@ export class StatsService {
     const to = filters.to ?? new Date();
     const from = filters.from ?? new Date(to.getTime() - 180 * 24 * 3600 * 1000);
     return this.db.withTenant(tenantId, () =>
-      this.reportRepo!.report(tenantId, { from, to, productType: filters.productType, origin: filters.origin }),
+      this.reportRepo!.report(tenantId, { from, to, productType: filters.productType, origin: filters.origin, workflowCode: filters.workflowCode }),
     );
   }
 
@@ -41,8 +40,7 @@ export class StatsService {
   }
 
   async byStage(tenantId: string): Promise<StatsByStage[]> {
-    const counts = await this.db.withTenant(tenantId, () => this.statsRepo.eventCountByStage(tenantId));
-    return STAGE_ORDER.map((stage) => ({ stage, count: counts[stage] ?? 0 }));
+    return this.db.withTenant(tenantId, () => this.statsRepo.eventCountByStage(tenantId));
   }
 
   /** Batches created per day, most recent 30 days with any activity, oldest first. */
@@ -54,7 +52,7 @@ export class StatsService {
     return this.db.withTenant(tenantId, () => this.statsRepo.byOrigin(tenantId));
   }
 
-  /** "What needs a human today": batches stuck at a stage, and anomalies nobody has resolved. */
+  /** "What needs a human today": lots stuck at a step, unanswered hand-overs, holds, rejections, open anomalies. */
   async attention(tenantId: string): Promise<AttentionSummary> {
     return this.db.withTenant(tenantId, () => this.statsRepo.attention(tenantId, STALLED_AFTER_DAYS, 8));
   }
