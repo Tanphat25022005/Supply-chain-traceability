@@ -6,10 +6,10 @@ Hệ thống quản lý và truy xuất nguồn gốc sản phẩm trong chuỗi
 
 - **Hash-chain bất biến, tự kiểm chứng được** — mỗi sự kiện được băm SHA-256 (JSON chuẩn hoá RFC 8785, có salt) nối với sự kiện trước; ai cũng tự tính lại được mà không cần khoá bí mật. Database tự chặn sửa/xoá sổ cái và kiểm tra liên kết khi ghi
 - **Cách ly tenant bằng PostgreSQL** — row-level security + khoá ngoại theo tenant; API chạy bằng role quyền tối thiểu
-- **RBAC** — 6 vai trò (Nông dân, Nhà chế biến, Kiểm định viên, Nhà phân phối, Nhà bán lẻ, Admin), mỗi vai trò chỉ ghi được khâu tương ứng
+- **RBAC** — 10 vai trò (Nông dân, Thương lái, Nhà chế biến, Kho, Kiểm định viên, Xuất khẩu, Phân phối, Bán lẻ, Nhập khẩu, Admin); mỗi khâu của quy trình ghi rõ vai trò nào được ghi
 - **Truy xuất 2 chiều** — thuận chiều (từ nông trại → kệ hàng) và ngược chiều
-- **Cảnh báo bất thường** — phát hiện ghi nhảy khâu, ghi trùng, ghi sai thứ tự
-- **Thu hồi lô hàng** — block mọi sự kiện mới khi lô đã bị thu hồi
+- **Cảnh báo bất thường** — bỏ khâu, ghi trùng, ghi muộn, cân thiếu khi bàn giao, hao hụt chế biến ngoài khoảng tham chiếu, xung đột lợi ích khi kiểm định
+- **Thu hồi lô hàng** — khoá lô, tạm giữ lô làm ra từ nó, gắn cờ điều tra lô cùng nguồn
 - **Trang công khai** — người tiêu dùng quét QR, xem nguồn gốc không cần đăng nhập
 
 ## Giai đoạn 1: chuỗi nhiều bên, kiểm chứng trên blockchain
@@ -21,6 +21,18 @@ Hệ thống quản lý và truy xuất nguồn gốc sản phẩm trong chuỗi
 - **Tiết lộ chọn lọc** (hash v3) — công khai mà không lộ dữ liệu nội bộ; link kiểm chứng đầy đủ có thời hạn cho kiểm toán viên
 
 Chi tiết: [docs/PHASE1.md](docs/PHASE1.md) · Đặc tả: [docs/SPEC_PHASE1.md](docs/SPEC_PHASE1.md)
+
+## Giai đoạn 1.5: nghiệp vụ khớp thực tế
+
+- **Danh mục sản phẩm hai cấp** — cà phê, lúa gạo, trái cây, chè, tiêu, cao su…; đơn vị và quy cách đóng gói quy đổi về kg
+- **Quy trình mẫu theo sản phẩm** — cà phê xuất khẩu, cà phê nội địa, trái cây tươi, lúa gạo; khâu bắt buộc không bỏ qua được
+- **Bàn giao hai chiều** — hàng chỉ đổi chủ khi bên nhận cân lại và xác nhận; trạng thái lô do database kiểm soát
+- **Kiểm định đạt / không đạt** — lô không đạt chỉ được chế biến lại, hạ loại hoặc huỷ
+- **Thời điểm xảy ra** tách khỏi thời điểm ghi (hash v4); ghi muộn phải có lý do
+- **Dữ liệu tham chiếu có nguồn** (World Bank, FAO/ICO, IRRI, VICOFA), doanh nghiệp ghi đè bằng số liệu thực đo
+- **Bên nhập khẩu xác nhận nhận hàng** qua link, không cần tài khoản
+
+Đặc tả: [docs/SPEC_PHASE1_5.md](docs/SPEC_PHASE1_5.md)
 
 ## Cấu trúc dự án
 
@@ -86,8 +98,12 @@ npm run dev           # Khởi động trên :5173 (proxy đến :3000)
 | Email                   | Vai trò       | Mật khẩu  |
 |-------------------------|---------------|-----------|
 | farmer@demo.com         | Nông dân      | demo1234  |
+| farmer2@demo.com        | Nông dân      | demo1234  |
+| collector@demo.com      | Thương lái    | demo1234  |
 | processor@demo.com      | Nhà chế biến  | demo1234  |
+| warehouse@demo.com      | Kho           | demo1234  |
 | inspector@demo.com      | Kiểm định     | demo1234  |
+| exporter@demo.com       | Xuất khẩu     | demo1234  |
 | distributor@demo.com    | Phân phối     | demo1234  |
 | retailer@demo.com       | Bán lẻ        | demo1234  |
 | admin@demo.com          | Admin         | demo1234  |
@@ -95,6 +111,7 @@ npm run dev           # Khởi động trên :5173 (proxy đến :3000)
 ## Tài liệu
 
 - [Cơ sở dữ liệu: migration, RLS, sổ cái, đặc tả hash, vận hành](docs/DATABASE.md)
+- [Đặc tả giai đoạn 1.5: danh mục, quy trình, trạng thái lô, bàn giao, hash v4](docs/SPEC_PHASE1_5.md)
 - [Blueprint tổng quan](docs/README.md)
 - [Kế hoạch 2 người](docs/KEHOACH_2NGUOI.md)
 - [Đặc tả màn hình](docs/MANHINH_THEO_VAITRO.md)

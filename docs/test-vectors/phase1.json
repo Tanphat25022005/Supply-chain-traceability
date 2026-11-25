@@ -35,6 +35,11 @@
           "moisture": 13.5
         }
       },
+      "publicDataKeys": [
+        "harvestDate",
+        "variety",
+        "cultivation"
+      ],
       "claimSalts": {
         "actorId": "20d632a3c593e4e91b07b0a848b81d8886de297a32f0e15d032eda8d4637b9fa",
         "location": "6dd8d61630fb634de3be63c7a445ceab316ca57a0d262ce053215c448cecaac7",
@@ -125,6 +130,9 @@
           "method": "WET"
         }
       },
+      "publicDataKeys": [
+        "method"
+      ],
       "claimSalts": {
         "actorId": "aa43881c7ee4c8a9176a62dba288f330c765f1ebe0a500f41c75c9459fa01a9b",
         "location": "8fe938ecbf83cb0fd7974bb1a4c8bdc9e80d3cf8b4679f33c226667e09a67cec",
@@ -176,6 +184,153 @@
         ],
         "hidden": [
           "4e3c9731fc13a127963b19ef6101bb68d3f026c3255967b683d97ba659e93908"
+        ]
+      }
+    }
+  ],
+  "hashV4": [
+    {
+      "label": "quality-check-late",
+      "event": {
+        "batchId": "9a7d8b52-4c3e-4f1a-b2d9-3e5f6a7b8c9d",
+        "sequenceNumber": 3,
+        "prevHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "stage": "QUALITY_CHECK",
+        "kind": "OBSERVE",
+        "links": [],
+        "actorId": "2f3e4d5c-6b7a-4899-a0b1-c2d3e4f5a6b7",
+        "timestamp": "2026-10-06T01:30:00.000Z",
+        "occurredAt": "2026-10-05T09:00:00.000Z",
+        "location": "Trung tâm kiểm định VN",
+        "data": {
+          "result": "PASS",
+          "grade": "G1",
+          "screenSize": "S16",
+          "moisture": 12.3,
+          "standard": "TCVN 4193:2014",
+          "certificateNo": "KĐ-2026-1008"
+        }
+      },
+      "publicDataKeys": [
+        "result",
+        "grade",
+        "screenSize",
+        "standard",
+        "certificateNo"
+      ],
+      "claimSalts": {
+        "actorId": "a1a850c3d46a6dbc8a6581a0399789663a97b706701001cc1645c8ad8f31c967",
+        "location": "5e49c22fa50eab0f8423e9039f1de350224d672610621df7d80bafe28df8800e",
+        "data.certificateNo": "377f335bedcaaacfe7e623d00f5381a93a44ccae27e8196af5cad14e3606d399",
+        "data.grade": "9c4be0f7086a2db13b6a159efb0947783a49233af60ee1f74a65d635e675e91b",
+        "data.moisture": "e5ccd36b938f531caa27f3e265ef69b5810ceadb866b07bfa4cca5ca013ec182",
+        "data.result": "c23832a735f839a2d1951a79c17268d823d29bd9f4de57987f5c01bd49673f19",
+        "data.screenSize": "a5c194bca803c50e157861b272b1a528f5ab16a6b3a7ec461115c425f89f1f51",
+        "data.standard": "fa4f87eceec2f8dfbddbfdd7cf66558e804a9f178d988a61bf5af27c2dcb7d42"
+      },
+      "hash": "1790dc4f82c7ddd692eac2be307ae88840d65b1ef01d0fc8dbfa02c030dde22d",
+      "publicDisclosure": {
+        "envelope": {
+          "v": 4,
+          "batchId": "9a7d8b52-4c3e-4f1a-b2d9-3e5f6a7b8c9d",
+          "sequenceNumber": 3,
+          "prevHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "stage": "QUALITY_CHECK",
+          "kind": "OBSERVE",
+          "timestamp": "2026-10-06T01:30:00.000Z",
+          "links": [],
+          "occurredAt": "2026-10-05T09:00:00.000Z"
+        },
+        "disclosed": [
+          {
+            "name": "location",
+            "value": "Trung tâm kiểm định VN",
+            "salt": "5e49c22fa50eab0f8423e9039f1de350224d672610621df7d80bafe28df8800e"
+          },
+          {
+            "name": "data.certificateNo",
+            "value": "KĐ-2026-1008",
+            "salt": "377f335bedcaaacfe7e623d00f5381a93a44ccae27e8196af5cad14e3606d399"
+          },
+          {
+            "name": "data.grade",
+            "value": "G1",
+            "salt": "9c4be0f7086a2db13b6a159efb0947783a49233af60ee1f74a65d635e675e91b"
+          },
+          {
+            "name": "data.result",
+            "value": "PASS",
+            "salt": "c23832a735f839a2d1951a79c17268d823d29bd9f4de57987f5c01bd49673f19"
+          },
+          {
+            "name": "data.screenSize",
+            "value": "S16",
+            "salt": "a5c194bca803c50e157861b272b1a528f5ab16a6b3a7ec461115c425f89f1f51"
+          },
+          {
+            "name": "data.standard",
+            "value": "TCVN 4193:2014",
+            "salt": "fa4f87eceec2f8dfbddbfdd7cf66558e804a9f178d988a61bf5af27c2dcb7d42"
+          }
+        ],
+        "hidden": [
+          "0cf992acb9037228177a8d67c60d531f8fb3469f1f71f93710eb6312391bd840",
+          "ba8e13945046ccd2fd5f628103a15f35e478f47078387b43005672d30ebc9664"
+        ]
+      }
+    },
+    {
+      "label": "recall",
+      "event": {
+        "batchId": "9a7d8b52-4c3e-4f1a-b2d9-3e5f6a7b8c9d",
+        "sequenceNumber": 4,
+        "prevHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "stage": "QUALITY_CHECK",
+        "kind": "RECALL",
+        "links": [],
+        "actorId": "2f3e4d5c-6b7a-4899-a0b1-c2d3e4f5a6b7",
+        "timestamp": "2026-10-07T08:00:00.000Z",
+        "occurredAt": "2026-10-07T08:00:00.000Z",
+        "location": "Trung tâm kiểm định VN",
+        "data": {
+          "reason": "Ochratoxin A vượt ngưỡng"
+        }
+      },
+      "publicDataKeys": [
+        "reason"
+      ],
+      "claimSalts": {
+        "actorId": "7c85fefbeba021e8f84cbcb85163026fe7e53261a7561a596b732d9c37275a52",
+        "location": "e31af77ccc4374dc208dee50cd8032ebd823958adbb9808af3493377a4be7339",
+        "data.reason": "8ec30f1f1ab9435d2b2938a247a2f5fc8abbc8c0514629f42feb67b95441d9d5"
+      },
+      "hash": "435b452fd0a8778851819ce3b826c74b3accbe4e8af44fad8496df59d5a31415",
+      "publicDisclosure": {
+        "envelope": {
+          "v": 4,
+          "batchId": "9a7d8b52-4c3e-4f1a-b2d9-3e5f6a7b8c9d",
+          "sequenceNumber": 4,
+          "prevHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "stage": "QUALITY_CHECK",
+          "kind": "RECALL",
+          "timestamp": "2026-10-07T08:00:00.000Z",
+          "links": [],
+          "occurredAt": "2026-10-07T08:00:00.000Z"
+        },
+        "disclosed": [
+          {
+            "name": "location",
+            "value": "Trung tâm kiểm định VN",
+            "salt": "e31af77ccc4374dc208dee50cd8032ebd823958adbb9808af3493377a4be7339"
+          },
+          {
+            "name": "data.reason",
+            "value": "Ochratoxin A vượt ngưỡng",
+            "salt": "8ec30f1f1ab9435d2b2938a247a2f5fc8abbc8c0514629f42feb67b95441d9d5"
+          }
+        ],
+        "hidden": [
+          "2bfcf4615669e4a8958114d65aa1e20e6e07ce1e08094f03e089074190f58aeb"
         ]
       }
     }
