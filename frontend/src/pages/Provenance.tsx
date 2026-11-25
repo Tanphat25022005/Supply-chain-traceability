@@ -1,26 +1,41 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import BackButton from '../components/BackButton'
-import { Building2, CircleX, MapPin, ShieldAlert, ShieldCheck, Siren, Sprout, TriangleAlert } from 'lucide-react'
-import { traceApi, PublicTrace, STAGE_ICONS, STAGE_LABELS } from '../api/client'
-import { describeEventData } from '../domain/stageFields'
+import { Building2, CircleX, MapPin, PauseCircle, ShieldAlert, ShieldCheck, Siren, Sprout, TriangleAlert } from 'lucide-react'
+import { CUSTODY_EVENT_LABELS, CustodyEventKind, isStageEvent, PublicTrace, stageIcon, stageLabel, traceApi } from '../api/client'
+import { useCatalog } from '../context/CatalogContext'
+import { describeEventData } from '../domain/catalog'
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' })
 }
 
 /** Where the product is now, in words a shopper uses — not "4/6 khâu". */
-function statusLine(data: PublicTrace): { text: string; tone: 'danger' | 'success' | 'info' } {
-  if (data.batch.isRecalled) return { text: 'Đã thu hồi', tone: 'danger' }
+function statusLine(data: PublicTrace): { text: string; tone: 'danger' | 'success' | 'info' | 'warning' } {
+  switch (data.batch.status) {
+    case 'RECALLED':
+      return { text: 'Đã thu hồi', tone: 'danger' }
+    case 'DESTROYED':
+      return { text: 'Đã huỷ', tone: 'danger' }
+    case 'REJECTED':
+      return { text: 'Không đạt kiểm định', tone: 'danger' }
+    case 'ON_HOLD':
+      return { text: 'Đang tạm giữ để kiểm tra', tone: 'warning' }
+  }
   switch (data.batch.currentStage) {
     case 'RETAIL':
       return { text: 'Đã đến cửa hàng', tone: 'success' }
+    case 'IMPORT_RECEIPT':
+      return { text: 'Đã đến nước nhập khẩu', tone: 'success' }
+    case 'EXPORT':
+      return { text: 'Đã xuất khẩu', tone: 'info' }
     case 'DISTRIBUTION':
-      return { text: 'Đang vận chuyển đến cửa hàng', tone: 'info' }
+    case 'COLD_CHAIN':
+      return { text: 'Đang vận chuyển', tone: 'info' }
     case null:
       return { text: 'Mới ghi nhận', tone: 'info' }
     default:
-      return { text: `Đang ở khâu ${STAGE_LABELS[data.batch.currentStage].toLowerCase()}`, tone: 'info' }
+      return { text: `Đang ở khâu ${stageLabel(data.batch.currentStage).toLowerCase()}`, tone: 'info' }
   }
 }
 
@@ -28,7 +43,11 @@ const toneClass = {
   danger: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
   success: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
   info: 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300',
+  warning: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
 }
+
+/** Custody events worth telling a shopper about; plain hand-over paperwork is not. */
+const PUBLIC_CUSTODY: CustodyEventKind[] = ['TRANSFER_ACCEPT', 'HOLD', 'RELEASE', 'RECALL', 'DISPOSE']
 
 /**
  * The page a shopper lands on after scanning the QR code. It tells the
@@ -38,6 +57,7 @@ const toneClass = {
  */
 export default function Provenance() {
   const { batchId } = useParams<{ batchId: string }>()
+  const { catalog } = useCatalog()
   const [data, setData] = useState<PublicTrace | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -93,6 +113,30 @@ export default function Provenance() {
           </p>
         </header>
 
+        {data.recalledInputs.length > 0 && !batch.isRecalled && (
+          <div role="alert" className="bg-rose-50 border-2 border-rose-300 dark:bg-rose-500/10 dark:border-rose-500/30 rounded-2xl p-4 mb-5">
+            <p className="font-bold text-rose-700 dark:text-rose-400 flex items-center gap-2">
+              <Siren className="w-5 h-5" /> Lô nguyên liệu của sản phẩm này đã bị thu hồi
+            </p>
+            <ul className="text-rose-700 dark:text-rose-300 text-sm mt-1.5 space-y-0.5">
+              {data.recalledInputs.map((r, i) => (
+                <li key={i}>
+                  {r.productName}
+                  {r.reason && ` — ${r.reason}`}
+                </li>
+              ))}
+            </ul>
+            <p className="text-rose-600 dark:text-rose-400/90 text-sm mt-2">Tạm ngừng sử dụng và liên hệ nơi bán trong khi chờ kết luận.</p>
+          </div>
+        )}
+
+        {batch.status === 'ON_HOLD' && (
+          <div role="status" className="bg-amber-50 border border-amber-200 dark:bg-amber-500/10 dark:border-amber-500/30 rounded-2xl p-4 mb-5 text-sm text-amber-800 dark:text-amber-300 flex gap-2">
+            <PauseCircle className="w-5 h-5 flex-shrink-0" />
+            <p>Lô hàng đang được tạm giữ để kiểm tra. Thông tin sẽ được cập nhật khi có kết luận.</p>
+          </div>
+        )}
+
         {batch.isRecalled && (
           <div role="alert" className="bg-rose-50 border-2 border-rose-300 dark:bg-rose-500/10 dark:border-rose-500/30 rounded-2xl p-4 mb-5">
             <p className="font-bold text-rose-700 dark:text-rose-400 flex items-center gap-2">
@@ -136,18 +180,37 @@ export default function Provenance() {
           ) : (
             <ol className="relative space-y-5">
               <span aria-hidden="true" className="absolute left-[17px] top-3 bottom-3 w-px bg-emerald-200 dark:bg-emerald-500/30" />
-              {journey.map((step, i) => {
-                const Icon = STAGE_ICONS[step.stage]
-                const facts = describeEventData(step.stage, step.details, { publicOnly: true })
+              {journey
+                .filter((step) => isStageEvent(step.kind) || PUBLIC_CUSTODY.includes(step.kind as CustodyEventKind))
+                .map((step, i) => {
+                if (!isStageEvent(step.kind)) {
+                  const danger = step.kind === 'RECALL' || step.kind === 'DISPOSE'
+                  return (
+                    <li key={i} className="relative pl-12 text-sm">
+                      <span
+                        className={`absolute left-2.5 top-0.5 w-4 h-4 rounded-full border-2 ${danger ? 'bg-rose-500 border-rose-500' : 'bg-white border-emerald-400 dark:bg-slate-900'}`}
+                      />
+                      <p className={danger ? 'text-rose-700 dark:text-rose-400 font-medium' : 'text-slate-600 dark:text-slate-300'}>
+                        {step.kind === 'TRANSFER_ACCEPT' ? 'Tiếp nhận hàng' : CUSTODY_EVENT_LABELS[step.kind as CustodyEventKind]}
+                        {step.organization && <span className="font-normal text-slate-500 dark:text-slate-400"> · {step.organization}</span>}
+                        <span className="text-xs text-slate-400 dark:text-slate-500"> · {formatDate(step.occurredAt ?? step.timestamp)}</span>
+                      </p>
+                      {typeof step.details.reason === 'string' && <p className="text-xs text-slate-500 dark:text-slate-400">{step.details.reason}</p>}
+                    </li>
+                  )
+                }
+                const Icon = stageIcon(step.stage)
+                const fields = catalog?.fieldsForEvent(step, catalog.productType(batch.productTypeId)?.categoryCode) ?? []
+                const facts = describeEventData(fields, step.details, { publicOnly: fields.length > 0 })
                 return (
                   <li key={i} className="relative pl-12">
                     <span className="absolute left-0 top-0 w-9 h-9 rounded-full bg-emerald-500 text-white flex items-center justify-center shadow-sm">
                       <Icon className="w-4 h-4" />
                     </span>
                     <div className="flex items-baseline justify-between gap-2">
-                      <p className="font-semibold text-slate-900 dark:text-slate-50">{STAGE_LABELS[step.stage]}</p>
-                      <time dateTime={step.timestamp} className="text-xs text-slate-400 dark:text-slate-500 flex-shrink-0">
-                        {formatDate(step.timestamp)}
+                      <p className="font-semibold text-slate-900 dark:text-slate-50">{catalog?.stageLabel(step.stage) ?? stageLabel(step.stage)}</p>
+                      <time dateTime={step.occurredAt} className="text-xs text-slate-400 dark:text-slate-500 flex-shrink-0">
+                        {formatDate(step.occurredAt ?? step.timestamp)}
                       </time>
                     </div>
                     {step.organization && (

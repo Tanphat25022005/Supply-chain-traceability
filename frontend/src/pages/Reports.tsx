@@ -11,7 +11,7 @@ import {
   YAxis,
 } from 'recharts'
 import { Check, CircleAlert, CircleCheck, Download, FilterX } from 'lucide-react'
-import { ANOMALY_TYPE_LABELS, batchApi, ReportData, STAGE_LABELS, statsApi } from '../api/client'
+import { ANOMALY_TYPE_LABELS, batchApi, ReportData, stageLabel, statsApi, STATUS_LABELS, TRANSFORMATION_LABELS } from '../api/client'
 import { ChartCard, ChartTooltip, DataBarCell, KpiCard, RingMeter } from '../components/report/ReportParts'
 import { fmtCompact, fmtDuration, fmtNumber, fmtPercent, useChartTheme } from '../components/report/chartTheme'
 import { apiErrorMessage } from '../lib/apiError'
@@ -68,6 +68,7 @@ export default function Reports() {
   const [customTo, setCustomTo] = useState('')
   const [productType, setProductType] = useState('')
   const [origin, setOrigin] = useState('')
+  const [workflowCode, setWorkflowCode] = useState('')
   const [data, setData] = useState<ReportData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -88,12 +89,12 @@ export default function Reports() {
     setLoading(true)
     setError('')
     statsApi
-      .report({ ...range, productType: productType || undefined, origin: origin || undefined })
+      .report({ ...range, productType: productType || undefined, origin: origin || undefined, workflowCode: workflowCode || undefined })
       .then(setData)
       .catch((err) => setError(apiErrorMessage(err, 'Không tải được báo cáo.')))
       .finally(() => setLoading(false))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [range.from, range.to, productType, origin])
+  }, [range.from, range.to, productType, origin, workflowCode])
 
   useEffect(load, [load])
 
@@ -103,6 +104,7 @@ export default function Reports() {
     setCustomTo('')
     setProductType('')
     setOrigin('')
+    setWorkflowCode('')
   }
 
   const handleExport = async () => {
@@ -202,6 +204,14 @@ export default function Reports() {
             <select value={productType} onChange={(e) => setProductType(e.target.value)} className={`${selectClass} mt-1`}>
               <option value="">Tất cả</option>
               {data?.options.productTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </label>
+
+          <label className="block">
+            <span className="text-xs font-medium text-white/70">Quy trình</span>
+            <select value={workflowCode} onChange={(e) => setWorkflowCode(e.target.value)} className={`${selectClass} mt-1`}>
+              <option value="">Tất cả</option>
+              {data?.options.workflows.map((w) => <option key={w.code} value={w.code}>{w.name}</option>)}
             </select>
           </label>
 
@@ -307,7 +317,7 @@ export default function Reports() {
                 <ChartCard className="xl:col-span-3" title="Phễu theo khâu" subtitle="Số lô đã đi tới mỗi khâu">
                   <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart layout="vertical" data={data.funnel.map((f) => ({ ...f, label: STAGE_LABELS[f.stage] }))} margin={{ top: 0, right: 36, bottom: 0, left: 0 }}>
+                      <BarChart layout="vertical" data={data.funnel.map((f) => ({ ...f, label: stageLabel(f.stage) }))} margin={{ top: 0, right: 36, bottom: 0, left: 0 }}>
                         <XAxis type="number" hide allowDecimals={false} />
                         <YAxis type="category" dataKey="label" tick={axisTick(theme.textSecondary)} axisLine={false} tickLine={false} width={96} />
                         <Tooltip
@@ -321,8 +331,8 @@ export default function Reports() {
                           )}
                         />
                         <Bar dataKey="batches" radius={[0, 4, 4, 0]} maxBarSize={20} isAnimationActive={false}>
-                          {data.funnel.map((f, i) => (
-                            <Cell key={f.stage} fill={theme.ordinal[i]} />
+                          {data.funnel.map((f) => (
+                            <Cell key={f.stage} fill={theme.series[0]} />
                           ))}
                           <LabelList dataKey="batches" position="right" fill={theme.textSecondary} fontSize={11} />
                         </Bar>
@@ -333,7 +343,7 @@ export default function Reports() {
 
                 {/* Ratios */}
                 <div className="xl:col-span-3 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 gap-3 content-start">
-                  <RingMeter label="Tỉ lệ hoàn tất chuỗi" percent={k.completionRate.value} caption="Lô đã tới khâu bán lẻ" />
+                  <RingMeter label="Tỉ lệ hoàn tất chuỗi" percent={k.completionRate.value} caption="Lô đã tới khâu cuối của quy trình" />
                   <RingMeter label="Sự kiện đã neo blockchain" percent={k.anchoredRate.value} caption="Kiểm chứng được độc lập" />
                 </div>
 
@@ -346,7 +356,7 @@ export default function Reports() {
                       <ResponsiveContainer width="100%" height="100%">
                         <BarChart
                           layout="vertical"
-                          data={data.stageDurations.map((d) => ({ ...d, label: `${STAGE_LABELS[d.from]} → ${STAGE_LABELS[d.to]}` }))}
+                          data={data.stageDurations.map((d) => ({ ...d, label: `${stageLabel(d.from)} → ${stageLabel(d.to)}` }))}
                           margin={{ top: 0, right: 64, bottom: 0, left: 0 }}
                         >
                           <XAxis type="number" hide />
@@ -522,6 +532,104 @@ export default function Reports() {
                               <td className="py-1.5 pr-3"><DataBarCell value={o.batches} max={originMax} label={fmtNumber(o.batches)} /></td>
                               <td className="py-1.5 pr-3 text-right">{o.anomalies || '—'}</td>
                               <td className="py-1.5 text-right">{o.recalls || '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </ChartCard>
+
+                {/* Lot status */}
+                <ChartCard className="xl:col-span-4" title="Trạng thái lô" subtitle="Lô tạo trong kỳ, theo trạng thái hiện tại">
+                  {data.statusBreakdown.length === 0 ? (
+                    <p className="text-sm text-slate-400 py-10 text-center">Không có dữ liệu</p>
+                  ) : (
+                    <table className="w-full text-sm">
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800 tabular-nums">
+                        {data.statusBreakdown.map((s) => (
+                          <tr key={s.status}>
+                            <td className="py-1.5 pr-3">{STATUS_LABELS[s.status]}</td>
+                            <td className="py-1.5">
+                              <DataBarCell value={s.batches} max={Math.max(...data.statusBreakdown.map((x) => x.batches), 1)} label={fmtNumber(s.batches)} />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </ChartCard>
+
+                {/* Losses */}
+                <ChartCard
+                  className="xl:col-span-8"
+                  title="Hao hụt"
+                  subtitle="Tỉ lệ đầu ra / đầu vào thực tế so với khoảng tham chiếu (có nguồn); hao hụt khi bàn giao và hàng bị huỷ"
+                >
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3 text-sm">
+                    <div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">Hụt khi bàn giao</p>
+                      <p className="font-semibold tabular-nums">
+                        {fmtNumber(data.losses.transit.shortfallKg)} kg
+                        <span className="text-xs font-normal text-slate-400">
+                          {' '}
+                          / {fmtNumber(data.losses.transit.sentKg)} kg gửi
+                          {data.losses.transit.sentKg > 0 && ` (${fmtPercent((data.losses.transit.shortfallKg / data.losses.transit.sentKg) * 100)})`}
+                        </span>
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">Bàn giao</p>
+                      <p className="tabular-nums">
+                        {data.losses.transit.accepted} đã nhận · {data.losses.transit.rejected} bị từ chối · {data.losses.transit.pending} đang chờ
+                        {data.losses.transit.discrepancies > 0 && <span className="text-amber-600 dark:text-amber-400"> · {data.losses.transit.discrepancies} lệch vượt ngưỡng</span>}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">Đã huỷ</p>
+                      <p className="font-semibold tabular-nums">{fmtNumber(data.losses.disposedKg)} kg</p>
+                    </div>
+                  </div>
+                  {data.losses.processes.length === 0 ? (
+                    <p className="text-sm text-slate-400 py-4 text-center">Chưa có lần chế biến / gộp / tách nào trong kỳ</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="text-left text-xs text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-700">
+                            <th className="py-2 pr-3 font-medium">Công đoạn</th>
+                            <th className="py-2 pr-3 font-medium text-right">Lần</th>
+                            <th className="py-2 pr-3 font-medium text-right">Vào → ra (kg)</th>
+                            <th className="py-2 pr-3 font-medium text-right">Tỉ lệ TB</th>
+                            <th className="py-2 pr-3 font-medium">Tham chiếu</th>
+                            <th className="py-2 font-medium text-right">Ngoài khoảng</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800 tabular-nums">
+                          {data.losses.processes.map((l) => (
+                            <tr key={`${l.kind}-${l.fromTypeId}-${l.toTypeId}`}>
+                              <td className="py-1.5 pr-3">
+                                <span className="font-medium text-slate-800 dark:text-slate-100">{TRANSFORMATION_LABELS[l.kind]}</span>
+                                <span className="block text-xs text-slate-500 dark:text-slate-400">
+                                  {l.fromType === l.toType ? l.fromType : `${l.fromType} → ${l.toType}`}
+                                </span>
+                              </td>
+                              <td className="py-1.5 pr-3 text-right">{l.count}</td>
+                              <td className="py-1.5 pr-3 text-right whitespace-nowrap">
+                                {fmtNumber(l.inKg)} → {fmtNumber(l.outKg)}
+                              </td>
+                              <td className="py-1.5 pr-3 text-right">{fmtPercent(l.avgRatio * 100)}</td>
+                              <td className="py-1.5 pr-3 text-xs text-slate-500 dark:text-slate-400 max-w-[16rem]">
+                                {l.min !== null && l.max !== null ? (
+                                  <>
+                                    {fmtPercent(l.min * 100)} – {fmtPercent(l.max * 100)}
+                                    {l.source && <span className="block truncate" title={l.source}>{l.source}</span>}
+                                  </>
+                                ) : (
+                                  'Chưa có số liệu tham chiếu'
+                                )}
+                              </td>
+                              <td className={`py-1.5 text-right ${l.outOfRange > 0 ? 'text-amber-600 dark:text-amber-400 font-medium' : ''}`}>{l.outOfRange || '—'}</td>
                             </tr>
                           ))}
                         </tbody>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import {
+  Boxes,
   LayoutDashboard,
   ListChecks,
   Users,
@@ -42,6 +43,7 @@ const NAV_ITEMS: Array<{ to: string; label: string; icon: LucideIcon; end?: bool
   { to: '/reports', label: 'Báo cáo', icon: BarChart3 },
   { to: '/notifications', label: 'Thông báo', icon: Bell },
   { to: '/admin/anomalies', label: 'Bất thường', icon: ShieldAlert, adminOnly: true },
+  { to: '/admin/catalog', label: 'Danh mục', icon: Boxes, adminOnly: true },
   { to: '/admin/audit-logs', label: 'Nhật ký', icon: ScrollText, adminOnly: true },
 ]
 

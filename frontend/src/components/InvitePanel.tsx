@@ -1,13 +1,13 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { Copy, Check, UserPlus } from 'lucide-react'
-import { adminApi, ActorRole, Invitation, ROLE_LABELS } from '../api/client'
+import { adminApi, ActorRole, Invitation, INVITABLE_ROLES, ROLE_LABELS } from '../api/client'
 import { apiErrorMessage } from '../lib/apiError'
 import Button from './ui/Button'
 import Badge from './ui/Badge'
 import { cardClass } from './ui/Card'
 import { inputClass, labelClass } from './ui/field'
 
-const INVITABLE: ActorRole[] = ['FARMER', 'PROCESSOR', 'INSPECTOR', 'DISTRIBUTOR', 'RETAILER', 'ADMIN']
+const INVITABLE: ActorRole[] = INVITABLE_ROLES
 
 function status(inv: Invitation): { label: string; tone: 'success' | 'neutral' | 'warning' | 'brand' } {
   if (inv.usedAt) return { label: 'Đã dùng', tone: 'success' }

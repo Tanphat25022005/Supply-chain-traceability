@@ -17,6 +17,10 @@ const ROLE_TONE: Record<ActorRole, BadgeTone> = {
   DISTRIBUTOR: 'warning',
   RETAILER: 'brand',
   ADMIN: 'danger',
+  COLLECTOR: 'success',
+  WAREHOUSE: 'orange',
+  EXPORTER: 'info',
+  IMPORTER: 'brand',
 }
 
 export default function Actors() {

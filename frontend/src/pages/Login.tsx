@@ -2,7 +2,9 @@ import { useState, FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Link2 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
-import { STAGE_ICONS, STAGE_LABELS, STAGE_ORDER } from '../api/client'
+import { STAGE_ICONS, STAGE_LABELS, SHOWCASE_STAGES } from '../api/client'
+
+const STAGE_ORDER = SHOWCASE_STAGES.map((s) => s.stage)
 import Button from '../components/ui/Button'
 import { inputClass, labelClass } from '../components/ui/field'
 import BackToHome from '../components/BackToHome'

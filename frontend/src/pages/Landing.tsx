@@ -2,7 +2,9 @@ import { Link, Navigate } from 'react-router-dom'
 import { Link2, Handshake, ShieldCheck, Zap, Smartphone, BarChart3, Sun, Moon, type LucideIcon } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { useTheme } from '../context/ThemeContext'
-import { STAGE_ICONS, STAGE_LABELS, STAGE_ORDER, ROLE_LABELS, ActorRole } from '../api/client'
+import { STAGE_ICONS, STAGE_LABELS, SHOWCASE_STAGES, ROLE_LABELS, ActorRole } from '../api/client'
+
+const STAGE_ORDER = SHOWCASE_STAGES.map((s) => s.stage)
 import { buttonClass } from '../components/ui/Button'
 import { cardClass } from '../components/ui/Card'
 
@@ -39,7 +41,7 @@ const FEATURES: Array<{ icon: LucideIcon; title: string; description: string }> 
   },
 ]
 
-const ROLES: ActorRole[] = ['FARMER', 'PROCESSOR', 'INSPECTOR', 'DISTRIBUTOR', 'RETAILER']
+const ROLES: ActorRole[] = ['FARMER', 'COLLECTOR', 'PROCESSOR', 'INSPECTOR', 'EXPORTER', 'RETAILER']
 
 export default function Landing() {
   const { actor, isLoading } = useAuth()

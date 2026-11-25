@@ -14,9 +14,11 @@ export interface VerificationPayload {
     stage: string
     kind: string
     timestamp: string
+    /** When it happened — committed in the envelope from hash v4 on. */
+    occurredAt?: string
     hash: string
     prevHash: string
-    hashVersion: 1 | 2 | 3
+    hashVersion: 1 | 2 | 3 | 4
     links: EventLink[]
     disclosure?: DisclosureV3
     contentV2?: ContentV2
@@ -42,6 +44,13 @@ export interface EventVerdict {
   id: string
   sequenceNumber: number
   stage: string
+  kind: string
+  /** When it was recorded. */
+  timestamp: string
+  /** When it happened (declared); equals `timestamp` before v4. */
+  occurredAt: string
+  /** occurredAt is covered by the hash (v4) — otherwise it is just what the server says. */
+  occurredAtCommitted: boolean
   /** 'ok' = recomputed from the data shown; 'mismatch' = the data doesn't produce the hash; 'opaque' = no data to recompute from (v1/v2 without a link). */
   content: 'ok' | 'mismatch' | 'opaque'
   /** prevHash equals the previous event's hash (and sequence numbers are contiguous). */
@@ -84,6 +93,10 @@ export interface VerifyOptions {
   trustedChainId?: number
 }
 
+function sameInstant(a: string, b: string): boolean {
+  return a === b || (!!a && !!b && new Date(a).getTime() === new Date(b).getTime())
+}
+
 export async function verifyBatch(payload: VerificationPayload, opts: VerifyOptions): Promise<BatchVerdict> {
   const problems: string[] = []
   const events: EventVerdict[] = []
@@ -102,12 +115,15 @@ export async function verifyBatch(payload: VerificationPayload, opts: VerifyOpti
     let hiddenFieldCount = 0
     if (e.disclosure) {
       const d = e.disclosure
+      // The envelope the hash commits to must be the event the page displays.
       const envelopeMatches =
         d.envelope.batchId === payload.batch.id &&
         d.envelope.sequenceNumber === e.sequenceNumber &&
         d.envelope.prevHash === e.prevHash &&
         d.envelope.stage === e.stage &&
-        d.envelope.kind === e.kind
+        d.envelope.kind === e.kind &&
+        sameInstant(d.envelope.timestamp, e.timestamp) &&
+        (d.envelope.v !== 4 || sameInstant(d.envelope.occurredAt, e.occurredAt ?? ''))
       content = envelopeMatches && (await hashOfDisclosure(d)) === e.hash ? 'ok' : 'mismatch'
       fields = d.disclosed.map(({ name, value }) => ({ name, value }))
       hiddenFieldCount = d.hidden.length
@@ -169,6 +185,10 @@ export async function verifyBatch(payload: VerificationPayload, opts: VerifyOpti
       id: e.id,
       sequenceNumber: e.sequenceNumber,
       stage: e.stage,
+      kind: e.kind,
+      timestamp: e.timestamp,
+      occurredAt: e.occurredAt ?? e.timestamp,
+      occurredAtCommitted: e.disclosure?.envelope.v === 4,
       content,
       linked,
       anchor,

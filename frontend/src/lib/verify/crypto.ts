@@ -81,8 +81,14 @@ export interface EnvelopeV3 {
   links: EventLink[]
 }
 
+/** v4 (docs/SPEC_PHASE1_5.md §0.5): the v3 envelope plus when the event happened. */
+export interface EnvelopeV4 extends Omit<EnvelopeV3, 'v'> {
+  v: 4
+  occurredAt: string
+}
+
 export interface DisclosureV3 {
-  envelope: EnvelopeV3
+  envelope: EnvelopeV3 | EnvelopeV4
   disclosed: Array<{ name: string; value: unknown; salt: string }>
   hidden: string[]
 }
@@ -91,7 +97,7 @@ export function claimCommitment(name: string, value: unknown, salt: string): Pro
   return sha256Text(canonicalize({ name, salt, value }))
 }
 
-/** SPEC §1.1: SHA256(JCS(envelope + sorted claim commitments)). */
+/** SPEC §1.1: SHA256(JCS(envelope + sorted claim commitments)) — the same for v3 and v4 envelopes. */
 export async function hashOfDisclosure(d: DisclosureV3): Promise<string> {
   const opened = await Promise.all(d.disclosed.map((c) => claimCommitment(c.name, c.value, c.salt)))
   const claims = [...opened, ...d.hidden].sort()

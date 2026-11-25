@@ -14,8 +14,9 @@ import {
   ShieldQuestion,
   XCircle,
 } from 'lucide-react'
-import { traceApi, STAGE_LABELS, SupplyChainStage } from '../api/client'
-import { formatFieldValue, STAGE_FIELDS } from '../domain/stageFields'
+import { CUSTODY_EVENT_LABELS, CustodyEventKind, isStageEvent, stageLabel, traceApi, TRANSFORMATION_LABELS, FieldDef, EventKind } from '../api/client'
+import { useCatalog } from '../context/CatalogContext'
+import { Catalog, formatFieldValue } from '../domain/catalog'
 import { anchorChainConfig, createAnchorReader } from '../lib/verify/chain'
 import { BatchVerdict, EventVerdict, verifyBatch, VerificationPayload } from '../lib/verify/verifyBatch'
 import Button from '../components/ui/Button'
@@ -24,17 +25,36 @@ import { cardClass } from '../components/ui/Card'
 
 type ApiErr = { response?: { status?: number } }
 
-const FIELD_LABELS: Record<string, string> = { location: 'Địa điểm', actorId: 'Người thực hiện (mã)', notes: 'Ghi chú' }
-
-function fieldLabel(stage: string, name: string): string {
-  if (FIELD_LABELS[name]) return FIELD_LABELS[name]
-  const key = name.replace(/^data\./, '')
-  return STAGE_FIELDS[stage as SupplyChainStage]?.find((f) => f.key === key)?.label ?? key
+const FIELD_LABELS: Record<string, string> = {
+  location: 'Địa điểm',
+  actorId: 'Người thực hiện (mã)',
+  notes: 'Ghi chú',
+  'data.reason': 'Lý do',
+  'data.method': 'Phương thức',
+  'data.recordNo': 'Số biên bản',
+  'data.harvestDate': 'Ngày thu hoạch',
+  'data.shelfDate': 'Ngày lên kệ',
 }
 
-function fieldValue(stage: string, name: string, value: unknown): string {
+/** The field's definition in any schema version of the stage (labels don't change between versions). */
+function fieldDef(catalog: Catalog | undefined, stage: string, key: string): FieldDef | undefined {
+  return catalog?.view.fieldSchemas.filter((s) => s.stage === stage).flatMap((s) => s.fields).find((f) => f.key === key)
+}
+
+function fieldLabel(catalog: Catalog | undefined, stage: string, name: string): string {
+  if (FIELD_LABELS[name]) return FIELD_LABELS[name]
+  const key = name.replace(/^data\./, '')
+  return fieldDef(catalog, stage, key)?.label ?? key
+}
+
+function fieldValue(catalog: Catalog | undefined, stage: string, name: string, value: unknown): string {
   if (!name.startsWith('data.')) return String(value)
-  return formatFieldValue(stage as SupplyChainStage, name.slice(5), value) || String(value)
+  return formatFieldValue(fieldDef(catalog, stage, name.slice(5)), value) || String(value)
+}
+
+function kindLabel(kind: string): string | null {
+  if (kind === 'OBSERVE') return null
+  return (TRANSFORMATION_LABELS as Record<string, string>)[kind] ?? CUSTODY_EVENT_LABELS[kind as CustodyEventKind] ?? kind
 }
 
 const fmt = (d: Date | string) =>
@@ -52,19 +72,28 @@ function Chip({ tone, children }: { tone: 'ok' | 'bad' | 'wait' | 'muted'; child
 
 function EventCard({ v, raw, explorerUrl }: { v: EventVerdict; raw: VerificationPayload['events'][number]; explorerUrl?: string }) {
   const [open, setOpen] = useState(false)
+  const { catalog } = useCatalog()
+  const kind = kindLabel(raw.kind)
+  const custody = !isStageEvent(raw.kind as EventKind)
+  const later = new Date(v.timestamp).getTime() - new Date(v.occurredAt).getTime() > 10 * 60 * 1000
   return (
-    <div className="p-4">
+    <div className={`p-4 ${custody ? 'bg-slate-50/60 dark:bg-slate-900/40' : ''}`}>
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <p className="text-sm font-semibold text-slate-900 dark:text-slate-50">
-            {v.sequenceNumber + 1}. {STAGE_LABELS[v.stage as SupplyChainStage] ?? v.stage}
-            {raw.kind !== 'OBSERVE' && (
+            {v.sequenceNumber + 1}. {custody ? kind : catalog?.stageLabel(v.stage) ?? stageLabel(v.stage)}
+            {!custody && kind && (
               <span className="ml-2 text-xs font-normal text-slate-500">
-                ({raw.kind === 'MERGE' ? 'gộp' : raw.kind === 'SPLIT' ? 'tách' : 'biến đổi'} từ {raw.links.length} lô)
+                ({kind.toLowerCase()} từ {raw.links.length} lô)
               </span>
             )}
+            {custody && <span className="ml-2 text-xs font-normal text-slate-500">· tại khâu {catalog?.stageLabel(v.stage) ?? stageLabel(v.stage)}</span>}
           </p>
-          <p className="text-xs text-slate-500 dark:text-slate-400">{fmt(raw.timestamp)}</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            Xảy ra lúc {fmt(v.occurredAt)}
+            {v.occurredAtCommitted ? ' (do người ghi khai, đã cam kết trong mã băm)' : ''}
+            {later && <> · ghi nhận lúc {fmt(v.timestamp)}</>}
+          </p>
         </div>
         <div className="flex gap-1.5 flex-wrap">
           {v.content === 'ok' && <Chip tone="ok"><CheckCircle2 className="w-3 h-3" /> Nội dung khớp</Chip>}
@@ -82,8 +111,8 @@ function EventCard({ v, raw, explorerUrl }: { v: EventVerdict; raw: Verification
         <dl className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1">
           {v.fields.map((f) => (
             <div key={f.name} className="text-sm">
-              <dt className="inline text-slate-500 dark:text-slate-400">{fieldLabel(v.stage, f.name)}: </dt>
-              <dd className="inline text-slate-800 dark:text-slate-100">{fieldValue(v.stage, f.name, f.value)}</dd>
+              <dt className="inline text-slate-500 dark:text-slate-400">{fieldLabel(catalog, v.stage, f.name)}: </dt>
+              <dd className="inline text-slate-800 dark:text-slate-100">{fieldValue(catalog, v.stage, f.name, f.value)}</dd>
             </div>
           ))}
         </dl>
@@ -95,7 +124,8 @@ function EventCard({ v, raw, explorerUrl }: { v: EventVerdict; raw: Verification
       )}
       {v.anchor === 'anchored' && v.anchoredAt && (
         <p className="mt-1.5 text-xs text-emerald-700 dark:text-emerald-400">
-          Đóng dấu trên blockchain lúc {fmt(v.anchoredAt)} · khối #{v.blockNumber}
+          Đóng dấu trên blockchain lúc {fmt(v.anchoredAt)} · khối #{v.blockNumber} — chứng minh bản ghi đã tồn tại từ thời điểm này
+
           {explorerUrl && v.txHash && (
             <a href={`${explorerUrl}/tx/${v.txHash}`} target="_blank" rel="noreferrer" className="ml-2 inline-flex items-center gap-0.5 underline">
               xem giao dịch <ExternalLink className="w-3 h-3" />

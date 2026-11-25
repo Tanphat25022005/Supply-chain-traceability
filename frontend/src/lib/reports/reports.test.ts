@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ExcelJS from 'exceljs'
 import JSZip from 'jszip'
 import { Actor, TraceResult } from '../../api/client'
-import { buildBatchReport, fileSlug, formatDateTime, isoLocal } from './model'
+import { buildBatchReport, fileSlug, formatDateTime, isoLocal, lateNote } from './model'
+import { fixtureCatalog } from '../../test/catalogFixture'
 import { buildBatchListXlsx, buildBatchXlsx, excelLocalDate } from './xlsx'
 import { buildBatchDocx } from './docx'
 import { buildBatchPdf } from './pdf'
@@ -28,6 +29,10 @@ const result: TraceResult = {
     headHash: 'h',
     eventCount: 1,
     consumedQuantity: 0,
+    status: 'ACTIVE',
+    lostQuantity: 0,
+    workflowId: 'wf-generic',
+    productTypeId: 'pt-other',
   },
   events: [
     {
@@ -36,6 +41,8 @@ const result: TraceResult = {
       stage: 'HARVEST',
       actorId: 'a1',
       timestamp: '2026-10-04T14:20:00.000Z',
+      // Entered two hours after the harvest — the report must show both times.
+      occurredAt: '2026-10-04T12:20:00.000Z',
       location: 'Cầu Đất, Đà Lạt',
       notes: 'Hái chín 95%',
       data: { harvestDate: '2026-10-04', variety: 'Robusta TR4', cultivation: 'VIETGAP' },
@@ -51,7 +58,7 @@ const result: TraceResult = {
   isValid: true,
 }
 
-const report = () => buildBatchReport(result, new Map([[actor.id, actor]]), 'https://trace.example/provenance/8162')
+const report = () => buildBatchReport(result, new Map([[actor.id, actor]]), 'https://trace.example/provenance/8162', fixtureCatalog)
 
 describe('report model', () => {
   it('formats dates identically everywhere (no browser-dependent toLocaleString)', () => {
@@ -68,7 +75,9 @@ describe('report model', () => {
   it('resolves people, stage labels and stage facts', () => {
     const step = report().steps[0]
     expect(step).toMatchObject({ stageLabel: 'Thu hoạch', organization: 'HTX Cầu Đất', person: 'Nguyễn Văn Nông', role: 'Nông dân' })
-    expect(step.facts).toContainEqual({ label: 'Tiêu chuẩn canh tác', value: 'VietGAP' })
+    expect(step.facts).toContainEqual({ label: 'Giống', value: 'Robusta TR4' })
+    expect(step.time.toISOString()).toBe('2026-10-04T12:20:00.000Z')
+    expect(lateNote(step)).toMatch(/^Ghi nhận muộn lúc/)
   })
 })
 
@@ -92,9 +101,10 @@ describe('Excel (.xlsx)', () => {
     const time = journey.getRow(2).getCell(3)
     expect(time.value).toBeInstanceOf(Date)
     expect(time.numFmt).toBe('dd/mm/yyyy hh:mm')
-    expect((time.value as Date).getTime()).toBe(excelLocalDate(new Date(result.events[0].timestamp)).getTime())
-    expect(journey.getRow(2).getCell(4).value).toBe('HTX Cầu Đất')
-    expect(String(journey.getRow(2).getCell(8).value)).toContain('Giống: Robusta TR4')
+    expect((time.value as Date).getTime()).toBe(excelLocalDate(new Date(result.events[0].occurredAt)).getTime())
+    expect((journey.getRow(2).getCell(4).value as Date).getTime()).toBe(excelLocalDate(new Date(result.events[0].timestamp)).getTime())
+    expect(journey.getRow(2).getCell(5).value).toBe('HTX Cầu Đất')
+    expect(String(journey.getRow(2).getCell(9).value)).toContain('Giống: Robusta TR4')
   })
 
   it('exports a batch list with filters recorded', async () => {

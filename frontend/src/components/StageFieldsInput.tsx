@@ -1,37 +1,31 @@
 import { Globe } from 'lucide-react'
-import { SupplyChainStage } from '../api/client'
-import { STAGE_FIELDS, StageField } from '../domain/stageFields'
+import { FieldDef } from '../api/client'
+import { isFieldRequired } from '../domain/catalog'
 import { inputClass, labelClass } from './ui/field'
 
 export type StageValues = Record<string, string>
 
-/** Form values (all strings) → the `data` payload: numbers parsed, blanks dropped. */
-export function toEventData(stage: SupplyChainStage, values: StageValues): Record<string, string | number> {
-  const data: Record<string, string | number> = {}
-  for (const field of STAGE_FIELDS[stage]) {
-    const raw = values[field.key]?.trim()
-    if (!raw) continue
-    data[field.key] = field.type === 'number' ? Number(raw) : raw
-  }
-  return data
-}
+export { toEventData } from '../domain/catalog'
 
 function FieldInput({
   field,
   id,
   value,
+  required,
   onChange,
 }: {
-  field: StageField
+  field: FieldDef
   id: string
   value: string
+  required: boolean
   onChange: (v: string) => void
 }) {
-  if (field.type === 'select') {
+  if (field.type === 'select' || field.type === 'boolean') {
+    const options = field.type === 'boolean' ? [{ value: 'true', label: 'Có' }, { value: 'false', label: 'Không' }] : field.options ?? []
     return (
-      <select id={id} value={value} onChange={(e) => onChange(e.target.value)} required={field.required} className={inputClass}>
+      <select id={id} value={value} onChange={(e) => onChange(e.target.value)} required={required} className={inputClass}>
         <option value="">— Chọn —</option>
-        {field.options?.map((o) => (
+        {options.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}
           </option>
@@ -45,16 +39,17 @@ function FieldInput({
       type={field.type}
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      required={field.required}
+      required={required}
       placeholder={field.placeholder}
       min={field.min}
       max={field.max}
+      maxLength={field.maxLength}
       step={field.type === 'number' ? 'any' : undefined}
       inputMode={field.type === 'number' ? 'decimal' : undefined}
-      className={`${inputClass} ${field.unit && !field.unit.startsWith('theo') ? 'pr-12' : ''}`}
+      className={`${inputClass} ${field.unit ? 'pr-14' : ''}`}
     />
   )
-  if (!field.unit || field.unit.startsWith('theo')) return input
+  if (!field.unit) return input
   return (
     <div className="relative">
       {input}
@@ -63,37 +58,45 @@ function FieldInput({
   )
 }
 
-/** The structured facts a stage records — rendered from STAGE_FIELDS so every stage has its own form. */
+/**
+ * The facts a stage records, drawn from the field schema of the lot's product
+ * group × stage (server-side the same schema validates the payload).
+ */
 export default function StageFieldsInput({
-  stage,
+  fields,
   values,
   onChange,
-  unitHint,
 }: {
-  stage: SupplyChainStage
+  fields: FieldDef[]
   values: StageValues
   onChange: (next: StageValues) => void
-  /** The batch's unit, shown for "theo đơn vị lô" quantities. */
-  unitHint?: string
 }) {
-  const fields = STAGE_FIELDS[stage]
+  if (fields.length === 0) return <p className="text-sm text-slate-400">Khâu này không có trường thông tin riêng.</p>
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-4">
       {fields.map((field) => {
         const id = `stage-field-${field.key}`
+        const required = isFieldRequired(field, values)
+        // A conditionally required field appears only when its condition can apply.
+        if (field.requiredWhen && !required && !values[field.key]) return null
         return (
           <div key={field.key} className={field.type === 'text' && !field.unit ? 'sm:col-span-2' : ''}>
             <label htmlFor={id} className={`${labelClass} flex items-center gap-1.5`}>
               {field.label}
-              {field.unit?.startsWith('theo') && unitHint && <span className="font-normal text-slate-400">({unitHint})</span>}
-              {field.required && <span className="text-rose-500">*</span>}
+              {required && <span className="text-rose-500">*</span>}
               {field.public && (
                 <span title="Hiển thị trên trang tra cứu công khai" className="text-slate-400 dark:text-slate-500">
                   <Globe className="w-3.5 h-3.5" aria-label="Công khai" />
                 </span>
               )}
             </label>
-            <FieldInput field={field} id={id} value={values[field.key] ?? ''} onChange={(v) => onChange({ ...values, [field.key]: v })} />
+            <FieldInput
+              field={field}
+              id={id}
+              value={values[field.key] ?? ''}
+              required={required}
+              onChange={(v) => onChange({ ...values, [field.key]: v })}
+            />
           </div>
         )
       })}

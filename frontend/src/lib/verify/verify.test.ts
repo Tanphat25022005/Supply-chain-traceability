@@ -22,6 +22,18 @@ describe('browser crypto agrees with the published spec vectors', () => {
     }
   })
 
+  it('hash v4 disclosures (occurredAt in the envelope)', async () => {
+    expect(vectors.hashV4.length).toBeGreaterThan(0)
+    for (const c of vectors.hashV4) {
+      expect(c.publicDisclosure.envelope.v).toBe(4)
+      expect(await hashOfDisclosure(c.publicDisclosure)).toBe(c.hash)
+      // Moving "when it happened" by a second changes the hash.
+      const shifted = structuredClone(c.publicDisclosure)
+      shifted.envelope.occurredAt = new Date(new Date(c.event.occurredAt).getTime() - 1000).toISOString()
+      expect(await hashOfDisclosure(shifted)).not.toBe(c.hash)
+    }
+  })
+
   it('Merkle inclusion proofs', async () => {
     for (const c of vectors.merkle) {
       for (let i = 0; i < c.leaves.length; i++) {
@@ -128,6 +140,37 @@ describe('verifyBatch', () => {
     const v = await verifyBatch(p, { reader: null })
     expect(v.complete).toBe(false)
     expect(v.overall).toBe('failed')
+  })
+
+  it('v4: the time shown must be the time the hash committed to', async () => {
+    const qc = vectors.hashV4[0]
+    const d = qc.publicDisclosure
+    const v4 = (occurredAt: string): VerificationPayload => ({
+      access: 'public',
+      batch: { id: d.envelope.batchId, productName: 'Cà phê', headHash: qc.hash, eventCount: 1 },
+      events: [
+        {
+          id: 'e4',
+          sequenceNumber: 0,
+          stage: d.envelope.stage,
+          kind: d.envelope.kind,
+          timestamp: d.envelope.timestamp,
+          occurredAt,
+          hash: qc.hash,
+          prevHash: '0'.repeat(64),
+          hashVersion: 4,
+          links: [],
+          disclosure: { ...structuredClone(d), envelope: { ...structuredClone(d.envelope), sequenceNumber: 0, prevHash: '0'.repeat(64) } },
+        },
+      ],
+    })
+    // (sequence/prevHash were rewritten to make a one-event chain, so the content no longer matches the vector's hash —
+    // what this checks is that the occurredAt comparison alone decides between the two runs.)
+    const honest = await verifyBatch(v4(d.envelope.occurredAt), { reader: null })
+    const lying = await verifyBatch(v4('2026-01-01T00:00:00.000Z'), { reader: null })
+    expect(honest.events[0]).toMatchObject({ occurredAt: d.envelope.occurredAt, occurredAtCommitted: true })
+    expect(lying.events[0].content).toBe('mismatch')
+    expect(honest.events[0].occurredAt).not.toBe(honest.events[0].timestamp) // recorded the morning after
   })
 
   it('an unreachable chain is reported, not mistaken for tampering', async () => {

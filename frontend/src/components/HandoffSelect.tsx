@@ -1,56 +1,64 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
-import { Actor, ROLE_LABELS, STAGE_LABELS, SupplyChainStage } from '../api/client'
-import { rolesForStage } from '../domain/stageFields'
+import { Actor, ActorRole, ROLE_LABELS } from '../api/client'
 import { inputClass, labelClass } from './ui/field'
 
 /**
- * "Who takes the batch next" — only active accounts whose role handles the
- * following stage are offered, and a single candidate is pre-selected so the
- * common case is zero clicks.
+ * "Who takes the lot next" — only active accounts whose role can do what may
+ * come next (per the lot's workflow) are offered; a single candidate is
+ * pre-selected so the common case is zero clicks. The receiver confirms
+ * receipt before the lot is theirs.
  */
 export default function HandoffSelect({
-  nextStage,
+  roles,
+  label,
   actors,
   value,
   onChange,
   isAdmin,
+  required = !isAdmin,
+  excludeId,
 }: {
-  nextStage: SupplyChainStage
+  /** Roles that can take it; empty = any partner (e.g. a rejected lot going back for rework). */
+  roles: ActorRole[]
+  label: string
   actors: Actor[]
   value: string
   onChange: (id: string) => void
   isAdmin: boolean
+  required?: boolean
+  /** Usually the current holder — handing to yourself is not a hand-over. */
+  excludeId?: string
 }) {
-  const roles = rolesForStage(nextStage)
-  const candidates = actors.filter((a) => a.isActive && roles.includes(a.role))
+  const candidates = useMemo(
+    () =>
+      actors.filter(
+        (a) => a.isActive && a.id !== excludeId && a.role !== 'IMPORTER' && (roles.length === 0 || roles.includes(a.role) || a.role === 'ADMIN'),
+      ),
+    [actors, roles, excludeId],
+  )
 
   useEffect(() => {
-    if (!value && candidates.length === 1) onChange(candidates[0].id)
-  }, [value, candidates, onChange])
+    const realCandidates = candidates.filter((a) => a.role !== 'ADMIN')
+    if (!value && required && realCandidates.length === 1) onChange(realCandidates[0].id)
+  }, [value, candidates, onChange, required])
 
   return (
     <div>
       <label htmlFor="handoff" className={labelClass}>
-        Bàn giao cho ({STAGE_LABELS[nextStage].toLowerCase()}) {!isAdmin && <span className="text-rose-500">*</span>}
+        {label} {required && <span className="text-rose-500">*</span>}
       </label>
-      <select
-        id="handoff"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        required={!isAdmin}
-        className={inputClass}
-      >
-        <option value="">{isAdmin ? '— Để trống (chưa giao cho ai) —' : '— Chọn người tiếp nhận —'}</option>
+      <select id="handoff" value={value} onChange={(e) => onChange(e.target.value)} required={required} className={inputClass}>
+        <option value="">{required ? '— Chọn người tiếp nhận —' : '— Tôi giữ lại / để trống —'}</option>
         {candidates.map((a) => (
           <option key={a.id} value={a.id}>
-            {a.organization} · {a.name}
+            {a.organization} · {a.name} ({ROLE_LABELS[a.role]})
           </option>
         ))}
       </select>
       {candidates.length === 0 && (
         <p className="text-xs text-amber-600 dark:text-amber-400 mt-1.5">
-          Chưa có {roles.map((r) => ROLE_LABELS[r].toLowerCase()).join(' hoặc ')} nào trong không gian làm việc.{' '}
+          Chưa có {roles.map((r) => ROLE_LABELS[r].toLowerCase()).join(' hoặc ') || 'đối tác'} nào trong không gian làm việc.{' '}
           {isAdmin ? (
             <Link to="/actors" className="underline font-medium">
               Mời thành viên
