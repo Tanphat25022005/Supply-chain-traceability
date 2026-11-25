@@ -1,9 +1,16 @@
 import { Link } from 'react-router-dom'
 import { BookOpen } from 'lucide-react'
-import { ROLE_LABELS, ROLE_STAGES, STAGE_ICONS, STAGE_LABELS, STAGE_ORDER, ActorRole } from '../api/client'
+import { ROLE_LABELS, SHOWCASE_STAGES, STAGE_ICONS, STAGE_LABELS, ActorRole } from '../api/client'
+
+const STAGE_ORDER = SHOWCASE_STAGES.map((s) => s.stage)
 import { cardClass } from '../components/ui/Card'
 
-const ROLES: ActorRole[] = ['FARMER', 'PROCESSOR', 'INSPECTOR', 'DISTRIBUTOR', 'RETAILER', 'ADMIN']
+const ROLES: ActorRole[] = ['FARMER', 'COLLECTOR', 'PROCESSOR', 'WAREHOUSE', 'INSPECTOR', 'EXPORTER', 'IMPORTER']
+
+/** The showcase stages each role records (ADMIN may record any of them). */
+function stagesOf(role: ActorRole): string[] {
+  return SHOWCASE_STAGES.filter((s) => s.roles.includes(role)).map((s) => STAGE_LABELS[s.stage])
+}
 
 export default function HowItWorks() {
   return (
@@ -18,7 +25,7 @@ export default function HowItWorks() {
         </div>
 
         <section className={cardClass({ padding: 'lg' })}>
-          <h2 className="font-semibold text-slate-900 dark:text-slate-50 mb-3">1. Sáu khâu của chuỗi cung ứng</h2>
+          <h2 className="font-semibold text-slate-900 dark:text-slate-50 mb-3">1. Các khâu của một chuỗi xuất khẩu cà phê</h2>
           <div className="flex flex-wrap gap-2">
             {STAGE_ORDER.map((s, i) => {
               const StageIcon = STAGE_ICONS[s]
@@ -26,6 +33,7 @@ export default function HowItWorks() {
               <div key={s} className="flex items-center gap-2">
                 <span className="bg-brand-50 text-brand-700 dark:bg-brand-500/10 dark:text-brand-400 text-sm px-3 py-1.5 rounded-full font-medium inline-flex items-center gap-1.5">
                   <StageIcon className="w-4 h-4" /> {STAGE_LABELS[s]}
+                  {!SHOWCASE_STAGES[i].required && <span className="text-[10px] font-normal opacity-70">(tuỳ chọn)</span>}
                 </span>
                 {i < STAGE_ORDER.length - 1 && <span className="text-slate-300 dark:text-slate-600">→</span>}
               </div>
@@ -33,7 +41,7 @@ export default function HowItWorks() {
             })}
           </div>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-3">
-            Mỗi lô hàng đi qua tuần tự các khâu này. Hệ thống ghi lại địa điểm, thời gian và người thực hiện ở mỗi khâu.
+            Mỗi loại sản phẩm theo một quy trình mẫu riêng (cà phê xuất khẩu, cà phê nội địa, trái cây tươi, lúa gạo, bán lẻ chung). Khâu bắt buộc không thể bỏ qua; khâu tuỳ chọn được phép bỏ qua nhưng hệ thống sẽ ghi cảnh báo. Mỗi khâu lưu lại địa điểm, thời điểm thực tế, người thực hiện và các trường dữ liệu riêng của loại sản phẩm.
           </p>
         </section>
 
@@ -69,12 +77,12 @@ export default function HowItWorks() {
             {ROLES.map((r) => (
               <div key={r} className="flex items-center justify-between text-sm">
                 <span className="text-slate-700 dark:text-slate-300 font-medium">{ROLE_LABELS[r]}</span>
-                <span className="text-slate-400 dark:text-slate-500">{ROLE_STAGES[r].map((s) => STAGE_LABELS[s]).join(', ')}</span>
+                <span className="text-slate-400 dark:text-slate-500">{stagesOf(r).join(', ') || '—'}</span>
               </div>
             ))}
           </div>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-3">
-            Mỗi vai trò chỉ được ghi sự kiện cho khâu tương ứng — nông dân không thể tự ghi "đã kiểm định chất lượng".
+            Mỗi vai trò chỉ được ghi sự kiện cho khâu tương ứng — nông dân không thể tự ghi "đã kiểm định chất lượng". Hàng chỉ đổi chủ khi bên nhận xác nhận đã nhận đủ (bàn giao hai chiều); quản trị viên có thể ghi thay mọi khâu.
           </p>
         </section>
 

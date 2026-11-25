@@ -1,6 +1,6 @@
 import { FormEvent, useState } from 'react'
 import { TriangleAlert } from 'lucide-react'
-import { Batch, batchApi } from '../api/client'
+import { Batch, batchApi, RecallOutcome } from '../api/client'
 import { apiErrorMessage } from '../lib/apiError'
 import Modal from './ui/Modal'
 import Button from './ui/Button'
@@ -19,7 +19,8 @@ interface RecallDialogProps {
   batch: Pick<Batch, 'id' | 'productName' | 'quantity' | 'unit'>
   open: boolean
   onClose: () => void
-  onRecalled: () => void
+  /** Called with what happened along the lineage. */
+  onRecalled: (outcome: RecallOutcome) => void
   /** Pre-selects a reason, e.g. right after a failed quality check. */
   initialReason?: (typeof REASONS)[number]
 }
@@ -33,6 +34,7 @@ export default function RecallDialog({ batch, open, onClose, onRecalled, initial
   const [category, setCategory] = useState<string>(initialReason ?? '')
   const [details, setDetails] = useState('')
   const [acknowledged, setAcknowledged] = useState(false)
+  const [cascade, setCascade] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -45,8 +47,7 @@ export default function RecallDialog({ batch, open, onClose, onRecalled, initial
     setBusy(true)
     setError('')
     try {
-      await batchApi.recall(batch.id, reason)
-      onRecalled()
+      onRecalled(await batchApi.recall(batch.id, reason, cascade))
     } catch (err) {
       setError(apiErrorMessage(err, 'Thu hồi lô hàng thất bại. Thử lại sau.'))
     } finally {
@@ -68,6 +69,7 @@ export default function RecallDialog({ batch, open, onClose, onRecalled, initial
               <li>Không ai ghi thêm được sự kiện cho lô này.</li>
               <li>Mọi đối tác liên quan nhận cảnh báo ngay.</li>
               <li>Trang tra cứu công khai hiển thị "Đã thu hồi" kèm lý do.</li>
+              <li>Các lô làm ra từ lô này bị tạm giữ (hoặc thu hồi cùng, nếu chọn bên dưới); các lô nguyên liệu và lô anh em được gắn cờ điều tra.</li>
               <li>Không thể hoàn tác.</li>
             </ul>
           </div>
@@ -108,6 +110,21 @@ export default function RecallDialog({ batch, open, onClose, onRecalled, initial
           />
           <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">Lý do sẽ hiển thị công khai cho người tiêu dùng.</p>
         </div>
+
+        <label className="flex items-start gap-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={cascade}
+            onChange={(e) => setCascade(e.target.checked)}
+            className="mt-0.5 w-4 h-4 rounded border-slate-300 text-rose-600 focus:ring-rose-500"
+          />
+          <span>
+            Thu hồi cả dây chuyền
+            <span className="block text-xs text-slate-500 dark:text-slate-400">
+              Mọi lô làm ra từ lô này cũng bị thu hồi ngay, thay vì chỉ tạm giữ chờ điều tra.
+            </span>
+          </span>
+        </label>
 
         <label className="flex items-start gap-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer">
           <input

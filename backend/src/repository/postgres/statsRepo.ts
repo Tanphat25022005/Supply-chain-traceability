@@ -1,7 +1,7 @@
 import { Database } from '../../db/database';
-import { AttentionSummary, StatsByDay, StatsByOrigin, StatsOverview, STAGE_ORDER, SupplyChainStage } from '../../domain/types';
+import { AttentionSummary, StatsByDay, StatsByOrigin, StatsByStage, StatsOverview, TRANSFER_OVERDUE_DAYS } from '../../domain/types';
 import { IStatsRepo } from '../interfaces';
-import { BATCH_COLUMNS, BatchRow, toBatch } from './batchRepo';
+import { BATCH_COLUMNS, BatchRow, HAS_REMAINING, toBatch } from './batchRepo';
 
 /** Dashboard aggregates computed by Postgres — no table is ever pulled into application memory. */
 export class PostgresStatsRepo implements IStatsRepo {
@@ -36,14 +36,17 @@ export class PostgresStatsRepo implements IStatsRepo {
     };
   }
 
-  async eventCountByStage(tenantId: string): Promise<Partial<Record<SupplyChainStage, number>>> {
-    const result = await this.db.query<{ stage: SupplyChainStage; count: string }>(
-      'SELECT stage, count(*) AS count FROM trace_events WHERE tenant_id = $1 GROUP BY stage',
+  /** Stage records per stage (custody/status events excluded), in the stage catalog's display order. */
+  async eventCountByStage(tenantId: string): Promise<StatsByStage[]> {
+    const result = await this.db.query<{ stage: string; count: string }>(
+      `SELECT e.stage, count(*) AS count
+         FROM trace_events e JOIN stages s ON s.code = e.stage
+        WHERE e.tenant_id = $1 AND e.kind IN ('OBSERVE', 'MERGE', 'SPLIT', 'TRANSFORM', 'REWORK', 'DOWNGRADE')
+        GROUP BY e.stage, s.sort_order
+        ORDER BY s.sort_order`,
       [tenantId],
     );
-    const counts: Partial<Record<SupplyChainStage, number>> = {};
-    for (const row of result.rows) counts[row.stage] = Number(row.count);
-    return counts;
+    return result.rows.map((r) => ({ stage: r.stage, count: Number(r.count) }));
   }
 
   /** The most recent `days` calendar days (UTC) that had any batch created, oldest first. */
@@ -66,30 +69,40 @@ export class PostgresStatsRepo implements IStatsRepo {
   async attention(tenantId: string, stalledAfterDays: number, limit: number): Promise<AttentionSummary> {
     // "Last activity" = newest event, or creation for a batch nobody has touched yet.
     const lastActivity = `COALESCE((SELECT max(e.timestamp) FROM trace_events e WHERE e.batch_id = b.id), b.created_at)`;
+    // Open, workable lots that haven't reached the last step of their own workflow.
     const stalledWhere = `b.tenant_id = $1
-        AND NOT b.is_recalled
-        AND b.current_stage IS DISTINCT FROM $2
-        AND ${lastActivity} < now() - make_interval(days => $3)`;
-    const params = [tenantId, STAGE_ORDER[STAGE_ORDER.length - 1], stalledAfterDays];
+        AND b.status = 'ACTIVE'
+        AND ${HAS_REMAINING}
+        AND NOT workflow_is_final(b.workflow_id, b.current_stage)
+        AND ${lastActivity} < now() - make_interval(days => $2)`;
+    const params = [tenantId, stalledAfterDays];
 
     const [stalled, counts] = await Promise.all([
       this.db.query<BatchRow>(
         `SELECT ${BATCH_COLUMNS} FROM batches b WHERE ${stalledWhere}
           ORDER BY ${lastActivity} ASC, b.id
-          LIMIT $4`,
+          LIMIT $3`,
         [...params, limit],
       ),
-      this.db.query<{ stalled: string; open_anomalies: string }>(
+      this.db.query<{ stalled: string; open_anomalies: string; overdue_transfers: string; on_hold: string; rejected: string }>(
         `SELECT (SELECT count(*) FROM batches b WHERE ${stalledWhere}) AS stalled,
-                (SELECT count(*) FROM anomalies WHERE tenant_id = $1 AND NOT resolved) AS open_anomalies`,
-        params,
+                (SELECT count(*) FROM anomalies WHERE tenant_id = $1 AND NOT resolved) AS open_anomalies,
+                (SELECT count(*) FROM transfers WHERE tenant_id = $1 AND status = 'PENDING'
+                    AND created_at < now() - make_interval(days => $3)) AS overdue_transfers,
+                (SELECT count(*) FROM batches WHERE tenant_id = $1 AND status = 'ON_HOLD') AS on_hold,
+                (SELECT count(*) FROM batches WHERE tenant_id = $1 AND status = 'REJECTED') AS rejected`,
+        [...params, TRANSFER_OVERDUE_DAYS],
       ),
     ]);
 
+    const c = counts.rows[0];
     return {
       stalledBatches: stalled.rows.map(toBatch),
-      stalledCount: Number(counts.rows[0].stalled),
-      openAnomalyCount: Number(counts.rows[0].open_anomalies),
+      stalledCount: Number(c.stalled),
+      openAnomalyCount: Number(c.open_anomalies),
+      overdueTransferCount: Number(c.overdue_transfers),
+      onHoldCount: Number(c.on_hold),
+      rejectedCount: Number(c.rejected),
     };
   }
 

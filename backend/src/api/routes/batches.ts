@@ -9,12 +9,29 @@ import { requireAuth, requireRole } from '../middleware/auth';
 import { validateBody, validateQuery } from '../middleware/validate';
 import {
   createBatchSchema,
+  createTransferSchema,
+  disposeBatchSchema,
   exportBatchesQuerySchema,
+  handOffSchema,
   paginationSchema,
+  reasonSchema,
   recallBatchSchema,
 } from '../../validation/schemas';
 
-const CSV_HEADERS = ['id', 'productName', 'productType', 'origin', 'quantity', 'unit', 'currentStage', 'isRecalled', 'createdAt'] as const;
+const CSV_HEADERS = [
+  'id',
+  'productName',
+  'productType',
+  'origin',
+  'quantity',
+  'unit',
+  'quantityBase',
+  'baseUnit',
+  'currentStage',
+  'status',
+  'isRecalled',
+  'createdAt',
+] as const;
 
 /**
  * RFC 4180 CSV for machine consumers: CRLF record separators, every field
@@ -54,6 +71,13 @@ export function batchRoutes(
   );
 
   router.get(
+    '/custody',
+    asyncHandler(async (req, res) => {
+      res.json(await supplyChainService.listInCustody(req.actor!));
+    }),
+  );
+
+  router.get(
     '/export',
     validateQuery(exportBatchesQuerySchema),
     asyncHandler(async (req, res) => {
@@ -72,7 +96,10 @@ export function batchRoutes(
         origin: b.origin,
         quantity: b.quantity,
         unit: b.unit,
+        quantityBase: b.quantityBase ?? '',
+        baseUnit: b.baseUnit ?? '',
         currentStage: b.currentStage ?? '',
+        status: b.status,
         isRecalled: b.isRecalled,
         createdAt: b.createdAt.toISOString(),
       }));
@@ -90,13 +117,20 @@ export function batchRoutes(
     }),
   );
 
+  router.get(
+    '/:id/custody',
+    asyncHandler(async (req, res) => {
+      res.json(await supplyChainService.custodyOf(req.actor!, req.params.id));
+    }),
+  );
+
   router.post(
     '/',
     // A batch represents a physical good's origin — only the actor who
     // actually harvested it (or an ADMIN, for corrections/imports) can bring
     // one into existence. Without this, any role at the far end of the chain
     // (e.g. a RETAILER) could fabricate a "batch" out of thin air with no
-    // harvest behind it.
+    // harvest behind it. (The workflow's first step decides precisely.)
     requireRole('FARMER', 'ADMIN'),
     validateBody(createBatchSchema),
     asyncHandler(async (req, res) => {
@@ -114,9 +148,55 @@ export function batchRoutes(
     requireRole('ADMIN', 'INSPECTOR'),
     validateBody(recallBatchSchema),
     asyncHandler(async (req, res) => {
-      const { reason } = req.body as { reason: string };
-      const batch = await supplyChainService.recallBatch(req.actor!, req.params.id, reason);
-      res.json(batch);
+      const dto = req.body as z.infer<typeof recallBatchSchema>;
+      const { batch, ...lineage } = await supplyChainService.recall(req.actor!, req.params.id, dto);
+      // The lot itself at the top level (as before), plus what happened along its lineage.
+      res.json({ ...batch, lineage });
+    }),
+  );
+
+  router.post(
+    '/:id/hold',
+    requireRole('ADMIN', 'INSPECTOR'),
+    validateBody(reasonSchema),
+    asyncHandler(async (req, res) => {
+      res.json(await supplyChainService.holdBatch(req.actor!, req.params.id, (req.body as { reason: string }).reason));
+    }),
+  );
+
+  router.post(
+    '/:id/release',
+    requireRole('ADMIN', 'INSPECTOR'),
+    validateBody(reasonSchema),
+    asyncHandler(async (req, res) => {
+      res.json(await supplyChainService.releaseBatch(req.actor!, req.params.id, (req.body as { reason: string }).reason));
+    }),
+  );
+
+  router.post(
+    '/:id/dispose',
+    validateBody(disposeBatchSchema),
+    asyncHandler(async (req, res) => {
+      res.json(await supplyChainService.disposeBatch(req.actor!, req.params.id, req.body as z.infer<typeof disposeBatchSchema>));
+    }),
+  );
+
+  // Hand-over the receiver must confirm (two-way custody).
+  router.post(
+    '/:id/transfers',
+    validateBody(createTransferSchema),
+    asyncHandler(async (req, res) => {
+      res.status(201).json(await supplyChainService.createTransfer(req.actor!, req.params.id, req.body as z.infer<typeof createTransferSchema>));
+    }),
+  );
+
+  // Older clients: same as POST /:id/transfers with only the receiver.
+  router.post(
+    '/:id/handoff',
+    validateBody(handOffSchema),
+    asyncHandler(async (req, res) => {
+      const { assignNextTo } = req.body as z.infer<typeof handOffSchema>;
+      res.json(await supplyChainService.handOff(req.actor!, req.params.id, assignNextTo));
     }),
   );
 

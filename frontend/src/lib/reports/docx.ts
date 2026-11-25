@@ -1,5 +1,5 @@
 import type { Paragraph as ParagraphT, Table as TableT } from 'docx'
-import { BatchReport, formatDateTime, formatQuantity } from './model'
+import { BatchReport, formatDateTime, formatQuantity, lateNote } from './model'
 
 /**
  * Word report as real .docx (Office Open XML, ECMA-376 / ISO/IEC 29500),
@@ -98,7 +98,7 @@ export async function buildBatchDocx(report: BatchReport): Promise<Blob> {
   // ── II. Journey ──
   const journeyRows = report.steps.map((s) => [
     String(s.index),
-    lines([s.stageLabel, formatDateTime(s.time)]),
+    lines([s.stageLabel, formatDateTime(s.time), lateNote(s)]),
     lines([s.organization, s.person && `${s.person}${s.role ? ` (${s.role})` : ''}`]),
     s.location,
     lines([...s.facts.map((f) => `${f.label}: ${f.value}`), s.notes && `Ghi chú: ${s.notes}`]),

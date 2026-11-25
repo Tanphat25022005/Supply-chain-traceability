@@ -1,4 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
+import { AnchorStore } from './anchor/anchorStore';
+import { AnchorWorker } from './anchor/anchorWorker';
+import { AnchorConfig, anchorConfigFromEnv, ViemAnchorChain } from './anchor/chain';
 import { Database } from './db/database';
 import { assertSchemaUpToDate } from './db/migrator';
 import { createPool } from './db/pool';
@@ -8,23 +11,40 @@ import { PostgresActorRepo } from './repository/postgres/actorRepo';
 import { PostgresAnomalyRepo } from './repository/postgres/anomalyRepo';
 import { PostgresAuditLogRepo } from './repository/postgres/auditLogRepo';
 import { PostgresBatchRepo } from './repository/postgres/batchRepo';
+import { PostgresCatalogRepo } from './repository/postgres/catalogRepo';
+import { PostgresCustodyRepo } from './repository/postgres/custodyRepo';
 import { PostgresEventRepo } from './repository/postgres/eventRepo';
 import { PostgresInvitationRepo } from './repository/postgres/invitationRepo';
+import { PostgresLineageRepo } from './repository/postgres/lineageRepo';
+import { PostgresPlotRepo } from './repository/postgres/plotRepo';
+import { PostgresReportRepo } from './repository/postgres/reportRepo';
 import { PostgresRefreshTokenRepo } from './repository/postgres/refreshTokenRepo';
 import { PostgresStatsRepo } from './repository/postgres/statsRepo';
 import { PostgresTenantRepo } from './repository/postgres/tenantRepo';
 import { seedSampleBatches } from './sampleData';
 import { AdminService } from './services/adminService';
 import { AuthOptions, AuthService } from './services/authService';
+import { CatalogService } from './services/catalogService';
 import { StatsService } from './services/statsService';
 import { SupplyChainService } from './services/supplyChainService';
 import { TraceService } from './services/traceService';
+import { LineageService } from './services/lineageService';
+import { PlotService } from './services/plotService';
 
 export interface AppConfig {
   jwtSecret: string;
   /** Former LEDGER_SIGNING_KEY — now only used to re-verify legacy v1 (HMAC) events. */
   legacyLedgerKey?: string;
   auth?: AuthOptions;
+  /** Blockchain anchoring (ANCHOR_* env); absent = anchoring disabled. */
+  anchor?: AnchorConfig;
+}
+
+/** Public facts about where events are anchored — the verifier reads the contract itself. */
+export interface AnchorInfo {
+  enabled: boolean;
+  chainId?: number;
+  contractAddress?: string;
 }
 
 export interface AppContext {
@@ -34,7 +54,15 @@ export interface AppContext {
   traceService: TraceService;
   statsService: StatsService;
   adminService: AdminService;
+  lineageService: LineageService;
+  plotService: PlotService;
+  catalogService: CatalogService;
   realtime: SocketRealtimeEmitter;
+  anchorStore: AnchorStore;
+  anchorWorker?: AnchorWorker;
+  anchorInfo: AnchorInfo;
+  /** Run loop interval for the worker, when enabled. */
+  anchorIntervalMs?: number;
 }
 
 /** Wires repositories and services around one Database — shared by the server and the test suite. */
@@ -48,21 +76,63 @@ export function createContext(db: Database, config: AppConfig): AppContext {
   const refreshTokenRepo = new PostgresRefreshTokenRepo(db);
   const statsRepo = new PostgresStatsRepo(db);
   const invitationRepo = new PostgresInvitationRepo(db);
+  const anchorStore = new AnchorStore(db);
+  const plotRepo = new PostgresPlotRepo(db);
+  const lineageRepo = new PostgresLineageRepo(db);
+  const catalogRepo = new PostgresCatalogRepo(db);
+  const custodyRepo = new PostgresCustodyRepo(db);
+  const organizationOf = async (actorId: string) => (await actorRepo.findById(actorId))?.organization ?? '';
 
   const realtime = new SocketRealtimeEmitter();
+  const supplyChainService = new SupplyChainService(
+    db,
+    { batchRepo, eventRepo, anomalyRepo, auditLogRepo, actorRepo, plotRepo, lineageRepo, catalogRepo, custodyRepo },
+    realtime,
+    config.jwtSecret,
+  );
+  const lineageService = new LineageService(
+    db,
+    { batchRepo, eventRepo, anomalyRepo, auditLogRepo, actorRepo, lineageRepo, catalogRepo, custodyRepo },
+    supplyChainService,
+  );
+
+  const anchorWorker = config.anchor
+    ? new AnchorWorker(anchorStore, new ViemAnchorChain(config.anchor), {
+        maxLeaves: config.anchor.maxLeaves,
+        confirmations: config.anchor.confirmations,
+        receiptTimeoutMs: 30_000,
+        resubmitAfterMs: 10 * 60_000,
+      })
+    : undefined;
 
   return {
     db,
     realtime,
+    anchorStore,
+    anchorWorker,
+    anchorIntervalMs: config.anchor?.intervalMs,
+    anchorInfo: config.anchor
+      ? { enabled: true, chainId: config.anchor.chainId, contractAddress: config.anchor.contractAddress }
+      : { enabled: false },
     authService: new AuthService(
       db,
       { actorRepo, refreshTokenRepo, auditLogRepo, tenantRepo, invitationRepo },
       config.jwtSecret,
       config.auth,
     ),
-    supplyChainService: new SupplyChainService(db, { batchRepo, eventRepo, anomalyRepo, auditLogRepo, actorRepo }, realtime),
-    traceService: new TraceService(db, { batchRepo, eventRepo, anomalyRepo, actorRepo }, config.legacyLedgerKey),
-    statsService: new StatsService(db, statsRepo),
+    supplyChainService,
+    lineageService,
+    catalogService: new CatalogService(db, catalogRepo, auditLogRepo),
+    plotService: new PlotService(db, plotRepo, auditLogRepo, lineageService, organizationOf),
+    traceService: new TraceService(
+      db,
+      { batchRepo, eventRepo, anomalyRepo, actorRepo, catalogRepo },
+      config.legacyLedgerKey,
+      anchorStore,
+      config.jwtSecret,
+      lineageService,
+    ),
+    statsService: new StatsService(db, statsRepo, new PostgresReportRepo(db, catalogRepo)),
     adminService: new AdminService(
       db,
       { tenantRepo, actorRepo, eventRepo, batchRepo, anomalyRepo, auditLogRepo },
@@ -83,8 +153,12 @@ const DEMO_TENANT_SLUG = 'demo-tenant';
 
 const DEMO_ACCOUNTS: Array<{ name: string; email: string; role: ActorRole; organization: string }> = [
   { name: 'Nguyễn Văn Nông', email: 'farmer@demo.com', role: 'FARMER', organization: 'Nông trại Đà Lạt' },
+  { name: "K'Bông", email: 'farmer2@demo.com', role: 'FARMER', organization: "Hộ K'Bông – Lạc Dương" },
+  { name: 'Đỗ Văn Thu Mua', email: 'collector@demo.com', role: 'COLLECTOR', organization: 'Đại lý thu mua Cầu Đất' },
   { name: 'Trần Thị Chế Biến', email: 'processor@demo.com', role: 'PROCESSOR', organization: 'Xưởng chế biến An Giang' },
+  { name: 'Vũ Thị Kho', email: 'warehouse@demo.com', role: 'WAREHOUSE', organization: 'Kho ngoại quan Bình Dương' },
   { name: 'Lê Văn Kiểm Định', email: 'inspector@demo.com', role: 'INSPECTOR', organization: 'Trung tâm kiểm định VN' },
+  { name: 'Ngô Văn Xuất Khẩu', email: 'exporter@demo.com', role: 'EXPORTER', organization: 'Công ty XNK Cà phê Lâm Đồng' },
   { name: 'Phạm Thị Phân Phối', email: 'distributor@demo.com', role: 'DISTRIBUTOR', organization: 'Công ty logistics ABC' },
   { name: 'Hoàng Văn Bán Lẻ', email: 'retailer@demo.com', role: 'RETAILER', organization: 'Siêu thị XYZ' },
   { name: 'Admin Hệ Thống', email: 'admin@demo.com', role: 'ADMIN', organization: 'TraceChain' },
@@ -122,7 +196,7 @@ export async function seedDemoData(ctx: AppContext): Promise<void> {
     if (!identity || identity.tenantId !== demoTenantId) return null;
     return ctx.db.withTenant(demoTenantId, () => actorRepo.findById(identity.actorId));
   };
-  await seedSampleBatches(ctx.supplyChainService, demoTenantId, findActorByEmail);
+  await seedSampleBatches(ctx, demoTenantId, findActorByEmail);
 }
 
 /**
@@ -189,7 +263,11 @@ export async function bootstrap(): Promise<AppContext> {
     await assertSchemaUpToDate(db);
     await checkConnectionRole(db);
 
-    const ctx = createContext(db, { jwtSecret, legacyLedgerKey: process.env.LEDGER_SIGNING_KEY || undefined });
+    const ctx = createContext(db, {
+      jwtSecret,
+      legacyLedgerKey: process.env.LEDGER_SIGNING_KEY || undefined,
+      anchor: anchorConfigFromEnv() ?? undefined,
+    });
     if (shouldSeedDemoData()) await seedDemoData(ctx);
     return ctx;
   } catch (err) {

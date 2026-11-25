@@ -39,6 +39,20 @@ node dist/db/migrate.js  # production / container
 | 007 | Hash v2, head của chuỗi trên `batches`, trigger kiểm tra liên kết khi INSERT, trigger chỉ-ghi-thêm (append-only) |
 | 008 | Index theo đúng các truy vấn thực tế (tenant + thời gian, trigram cho tìm kiếm) |
 | 009 | Role `tracechain_app`, quyền theo từng cột, RLS, các hàm `SECURITY DEFINER` |
+| 010 | Lời mời (`invitations`): đăng ký bằng mã mời, vai trò lấy từ lời mời |
+| 011 | Hash v3 (cột `kind`, `links`, `claim_salts`); bảng `transformations`, `transformation_inputs`, `transformation_outputs`; `batches.consumed_quantity`; cảnh báo `MASS_BALANCE_VIOLATION` |
+| 012 | Neo blockchain: `anchors` (root, giao dịch, trạng thái) và `anchor_leaves` (vị trí lá + bằng chứng Merkle) |
+| 013 | PostGIS: bảng `plots` (đa giác hoặc điểm, diện tích, ràng buộc EUDR), `batches.plot_id` |
+| 014 | Dữ liệu tham chiếu cân bằng khối lượng: `conversion_factors`, `yield_caps` |
+| 015 | Danh mục hai cấp (nền tảng + doanh nghiệp): `product_categories`, `product_types`, `units`; `batches.product_type_id`, `unit_factor`, cột sinh `quantity_base`; `catalog_norm()`; `gln` cho actors/plots |
+| 016 | Khâu (`stages`), quy trình mẫu (`workflow_templates`, `workflow_steps`), `batches.workflow_id`; vai trò COLLECTOR, WAREHOUSE, EXPORTER, IMPORTER; `workflow_position()`, `workflow_is_final()` |
+| 017 | Bộ trường theo nhóm sản phẩm × khâu có phiên bản (`field_schemas`), `trace_events.field_schema_id` |
+| 018 | Trạng thái lô (`status`, `lost_quantity`), `batch_holds`, `transfers` (bàn giao hai chiều), kiểu sự kiện quyền giữ hàng, `occurred_at`, hash v4, cảnh báo mới |
+| 019 | Dữ liệu tham chiếu có nguồn và ghi đè theo doanh nghiệp: `conversion_factors`, `process_ratios`, `yield_caps`, `product_settings` |
+
+Nghiệp vụ của 015–019: **[SPEC_PHASE1_5.md](SPEC_PHASE1_5.md)**.
+
+Từ migration 013, database cần image **`postgis/postgis:16-3.4-alpine`** (docker-compose, Testcontainers và CI đều đã dùng image này).
 
 ## 3. Bảo đảm do database thực thi
 
@@ -46,7 +60,7 @@ Các bảo đảm dưới đây vẫn đúng **kể cả khi code ứng dụng c
 
 ### 3.1 Cách ly tenant
 
-- **RLS** được bật trên `actors`, `batches`, `trace_events`, `anomalies`, `audit_logs`, `refresh_tokens`. Mỗi policy so `tenant_id` với `app_current_tenant()`, tức giá trị `app.tenant_id` mà ứng dụng đặt bằng `set_config(..., true)` cho từng transaction.
+- **RLS** được bật trên `actors`, `batches`, `trace_events`, `anomalies`, `audit_logs`, `refresh_tokens` và các bảng nghiệp vụ thêm sau (`plots`, `transformations`, `batch_holds`, `transfers`…). Bảng danh mục và tham chiếu dùng policy hai cấp: đọc được dòng nền tảng (`tenant_id IS NULL`) lẫn dòng của mình, chỉ ghi dòng của mình. Mỗi policy so `tenant_id` với `app_current_tenant()`, tức giá trị `app.tenant_id` mà ứng dụng đặt bằng `set_config(..., true)` cho từng transaction.
 - Query chạy ngoài transaction tenant **không thấy gì và không ghi được gì**. Lỗi quên lọc tenant vì vậy luôn an toàn, không bao giờ làm lộ dữ liệu.
 - **FK kép** `(x_id, tenant_id) → (id, tenant_id)` khiến không thể tạo tham chiếu chéo tenant. Ví dụ: không thể tạo batch có người tạo thuộc tenant khác.
 - Một số thao tác diễn ra *trước khi* biết tenant. Mỗi thao tác này đi qua một hàm `SECURITY DEFINER` chỉ trả về định danh, không trả dữ liệu nghiệp vụ:
@@ -59,7 +73,7 @@ Các bảo đảm dưới đây vẫn đúng **kể cả khi code ứng dụng c
 ### 3.2 Quyền tối thiểu của `tracechain_app`
 
 - Bảng `trace_events` và `audit_logs`: chỉ có `SELECT` và `INSERT`.
-- Bảng `batches`: chỉ được `UPDATE` các cột `current_stage`, `assigned_to_actor_id`, `is_recalled`, `recall_reason`. **Không** được ghi `head_hash` hay `event_count`.
+- Bảng `batches`: chỉ được `UPDATE` các cột trạng thái nghiệp vụ (`current_stage`, `assigned_to_actor_id`, `status`, `recall_reason`, `consumed_quantity`, `lost_quantity`, gán danh mục một lần). **Không** được ghi `head_hash` hay `event_count`.
 - Không được DDL, không `TRUNCATE`, không `DELETE` bảng nghiệp vụ nào.
 - Khi chạy production, server **từ chối khởi động** nếu kết nối bằng superuser, role có `BYPASSRLS`, hoặc role sở hữu bảng. Có thể ghi đè bằng `ALLOW_PRIVILEGED_DB_ROLE=true`, nhưng không nên.
 
@@ -69,11 +83,13 @@ Các bảo đảm dưới đây vẫn đúng **kể cả khi code ứng dụng c
 - Trigger `ledger_append_event`, chạy trước mỗi INSERT vào `trace_events`:
   1. Khóa dòng batch.
   2. Kiểm tra `sequence_number = batches.event_count` và `prev_hash = batches.head_hash`.
-  3. Chặn ghi nếu batch đã bị thu hồi.
-  4. Tiến head lên event mới.
+  3. Chặn ghi nếu lô đã bị thu hồi, đã huỷ hoặc đã dùng hết.
+  4. Kiểm tra khâu thuộc quy trình của lô và `occurred_at` không lùi so với sự kiện trước.
+  5. Tiến head lên event mới.
 
   Vì vậy không ai fork, ghi lại (replay) hay ghi xen vào chuỗi được, kể cả khi code ứng dụng có bug.
-- Trigger `batches_guard_update` chặn ba việc: hủy một lần thu hồi, lùi `current_stage`, và lùi `event_count`.
+- Trigger `batches_guard_update` chặn: chuyển trạng thái lô ngoài bảng cho phép (SPEC_PHASE1_5.md §0.1, ví dụ huỷ một lần thu hồi), lùi `current_stage`, lùi `event_count` / `consumed_quantity` / `lost_quantity`, đổi quy trình. `batches_guard_catalog` chặn đổi loại sản phẩm và hệ số quy đổi đã gán.
+- `batch_holds` và `transfers` chỉ được ghi phần trả lời (gỡ tạm giữ; nhận / từ chối / huỷ bàn giao) đúng một lần.
 
 ### 3.4 Giới hạn (nói thẳng)
 
@@ -81,12 +97,20 @@ Các bảo đảm dưới đây vẫn đúng **kể cả khi code ứng dụng c
   - Sửa nội dung một event: lần quét toàn vẹn kế tiếp sẽ phát hiện.
   - Xóa các event cuối mà **không** sửa head: cũng bị phát hiện, vì chuỗi không còn khớp với head.
   - Nhưng một superuser đủ kiên nhẫn có thể **viết lại toàn bộ chuỗi lẫn head cho khớp nhau**. Hash v2 không dùng bí mật, nên không gì trong database ngăn được việc này.
-- Đó chính là việc của **giai đoạn 1: neo Merkle root lên blockchain công khai**. Khi đã neo, việc viết lại chuỗi sẽ mâu thuẫn với dữ liệu đã nằm trên chain, và ai cũng kiểm tra được.
+- Đó chính là việc của **giai đoạn 1: neo Merkle root lên blockchain công khai** (đã làm — migration 012, xem [PHASE1.md](PHASE1.md)). Khi đã neo, việc viết lại chuỗi sẽ mâu thuẫn với root đã nằm trên chain, và ai cũng kiểm tra được. Test `fraudScenarios.test.ts` mô phỏng đúng kẻ tấn công này: viết lại cả chuỗi, head lẫn cây Merkle trong DB — chỉ đối chiếu với chain mới phát hiện.
 - Hash chain chỉ chứng minh dữ liệu **không bị sửa sau khi ghi**. Nó không chứng minh dữ liệu **đúng ngay lúc nhập**. Phần đó cần cân bằng khối lượng và bằng chứng hiện trường, thuộc giai đoạn 1 và 2.
 
 ## 4. Đặc tả hash sự kiện
 
-### v2 (từ migration 007, mặc định cho mọi event mới)
+### v4 (từ migration 018, mặc định cho mọi event mới)
+
+v3 cộng thêm `occurredAt` (thời điểm xảy ra do người ghi khai) trong phần khung công khai. Đặc tả: [SPEC_PHASE1_5.md §0.5](SPEC_PHASE1_5.md).
+
+### v3 (migration 011 đến 017)
+
+Cam kết theo từng trường để **tiết lộ chọn lọc**: trang công khai chỉ mở các trường được công bố, các trường nội bộ chỉ còn mã cam kết, nhưng người ngoài vẫn tính lại được hash. Đặc tả đầy đủ, cây Merkle và hợp đồng neo: **[SPEC_PHASE1.md](SPEC_PHASE1.md)**; bộ test vector: [test-vectors/phase1.json](test-vectors/phase1.json).
+
+### v2 (migration 007 đến 010)
 
 ```
 hash = hex( SHA-256( UTF-8( JCS(preimage) ) ) )
@@ -111,7 +135,7 @@ hash = hex( SHA-256( UTF-8( JCS(preimage) ) ) )
 
 Cách tự xác minh một lô hàng:
 
-1. Gọi `GET /api/trace/public/{batchId}/full`. Endpoint này công khai và trả về đủ mọi trường kể cả `salt`.
+1. Lấy dữ liệu event và `salt`. **Từ giai đoạn 1**, endpoint công khai `GET /api/trace/public/{batchId}/full` không còn trả nội dung event v2; nội dung chỉ có qua link kiểm chứng (`?token=…`, xem SPEC_PHASE1.md §6).
 2. Với từng event, dựng `preimage` như bảng trên, chuẩn hóa bằng JCS rồi tính SHA-256. Kết quả phải bằng `hash`.
 3. Kiểm tra `prevHash` của mỗi event bằng `hash` của event trước, và `sequenceNumber` liên tục từ 0.
 4. So hash cuối cùng và số event với `headHash` / `eventCount` của lô.

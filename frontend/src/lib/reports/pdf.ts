@@ -1,5 +1,5 @@
 import type { jsPDF as JsPdf } from 'jspdf'
-import { BatchReport, formatDateTime, formatQuantity } from './model'
+import { BatchReport, formatDateTime, formatQuantity, lateNote } from './model'
 import { loadFontBase64 } from './download'
 
 /**
@@ -145,6 +145,7 @@ export async function buildBatchPdf(report: BatchReport): Promise<Blob> {
         after: 0.8,
       })
     }
+    if (lateNote(step)) paragraph(lateNote(step), { size: 9.5, color: MUTED, x: MARGIN.left + indent, width: CONTENT_W - indent, after: 0.8 })
     if (step.notes) paragraph(`Ghi chú: ${step.notes}`, { size: 9.5, color: MUTED, x: MARGIN.left + indent, width: CONTENT_W - indent, after: 0.8 })
     paragraph(`SHA-256: ${step.hash}`, { size: 7, color: FAINT, x: MARGIN.left + indent, width: CONTENT_W - indent, after: 4 })
   }

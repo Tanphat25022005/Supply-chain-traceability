@@ -2,6 +2,7 @@ import React, { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { ThemeProvider } from './context/ThemeContext'
+import { CatalogProvider } from './context/CatalogContext'
 import RealtimeAlerts from './components/RealtimeAlerts'
 import NavBar from './components/NavBar'
 
@@ -11,6 +12,8 @@ const Register = lazy(() => import('./pages/Register'))
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const RecordEvent = lazy(() => import('./pages/RecordEvent'))
 const NewBatch = lazy(() => import('./pages/NewBatch'))
+const TransformLots = lazy(() => import('./pages/TransformLots'))
+const Plots = lazy(() => import('./pages/Plots'))
 const BatchDetail = lazy(() => import('./pages/BatchDetail'))
 const Provenance = lazy(() => import('./pages/Provenance'))
 const Profile = lazy(() => import('./pages/Profile'))
@@ -24,6 +27,8 @@ const AuditLog = lazy(() => import('./pages/AuditLog'))
 const ChainVerifier = lazy(() => import('./pages/ChainVerifier'))
 const HowItWorks = lazy(() => import('./pages/HowItWorks'))
 const QRScan = lazy(() => import('./pages/QRScan'))
+const CatalogAdmin = lazy(() => import('./pages/CatalogAdmin'))
+const ImportReceipt = lazy(() => import('./pages/ImportReceipt'))
 
 function PageLoading() {
   return (
@@ -71,10 +76,14 @@ function AppRoutes() {
         <Route path="/provenance/:batchId" element={<Provenance />} />
         <Route path="/verify" element={<ChainVerifier />} />
         <Route path="/how-it-works" element={<HowItWorks />} />
+        {/* The foreign buyer confirms receipt from the exporter's link — no account. */}
+        <Route path="/receipt" element={<ImportReceipt />} />
 
         <Route path="/dashboard" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
         <Route path="/record" element={<PrivateRoute><RecordEvent /></PrivateRoute>} />
         <Route path="/batches/new" element={<PrivateRoute><NewBatch /></PrivateRoute>} />
+        <Route path="/lots/transform" element={<PrivateRoute><TransformLots /></PrivateRoute>} />
+        <Route path="/plots" element={<PrivateRoute><Plots /></PrivateRoute>} />
         <Route path="/batch/:id" element={<PrivateRoute><BatchDetail /></PrivateRoute>} />
         <Route path="/profile" element={<PrivateRoute><Profile /></PrivateRoute>} />
         <Route path="/actors" element={<PrivateRoute><Actors /></PrivateRoute>} />
@@ -86,6 +95,7 @@ function AppRoutes() {
 
         <Route path="/admin/anomalies" element={<AdminRoute><AnomalyMonitor /></AdminRoute>} />
         <Route path="/admin/audit-logs" element={<AdminRoute><AuditLog /></AdminRoute>} />
+        <Route path="/admin/catalog" element={<AdminRoute><CatalogAdmin /></AdminRoute>} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
@@ -97,10 +107,12 @@ export default function App() {
   return (
     <ThemeProvider>
       <AuthProvider>
-        <BrowserRouter>
-          <RealtimeAlerts />
-          <AppRoutes />
-        </BrowserRouter>
+        <CatalogProvider>
+          <BrowserRouter>
+            <RealtimeAlerts />
+            <AppRoutes />
+          </BrowserRouter>
+        </CatalogProvider>
       </AuthProvider>
     </ThemeProvider>
   )

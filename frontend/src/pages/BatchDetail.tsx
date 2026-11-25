@@ -1,41 +1,53 @@
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { ArrowLeft, CheckCircle2, ChevronDown, Clock3, Download, ExternalLink, Siren, TriangleAlert } from 'lucide-react'
-import { useAuth } from '../context/AuthContext'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
-  Actor,
-  actorsApi,
-  batchApi,
-  traceApi,
-  TraceResult,
-  ROLE_LABELS,
-  STAGE_ICONS,
-  STAGE_LABELS,
-  STAGE_ORDER,
-} from '../api/client'
-import { canActOn, nextStageOf, relativeDays } from '../domain/stageFields'
+  ArrowLeft,
+  CheckCircle2,
+  ChevronDown,
+  Clock3,
+  Download,
+  ExternalLink,
+  Inbox,
+  PauseCircle,
+  PlayCircle,
+  Recycle,
+  Siren,
+  Trash2,
+  TriangleAlert,
+} from 'lucide-react'
+import { useAuth } from '../context/AuthContext'
+import { useCatalog } from '../context/CatalogContext'
+import { Actor, actorsApi, batchApi, CustodyView, remainingOf, ROLE_LABELS, stageIcon, traceApi, TraceResult, Workflow } from '../api/client'
+import { canActOn, Catalog, formatDateTime, nextStepLabel, relativeDays } from '../domain/catalog'
 import { apiErrorMessage } from '../lib/apiError'
 import { buildBatchReport } from '../lib/reports/model'
 import { downloadBlob, MIME } from '../lib/reports/download'
 import Timeline from '../components/Timeline'
 import VerifyBadge from '../components/VerifyBadge'
 import RecallDialog from '../components/RecallDialog'
-import Badge from '../components/ui/Badge'
+import VerifyPanel from '../components/VerifyPanel'
+import LineagePanel from '../components/LineagePanel'
+import HandOffPanel from '../components/HandOffPanel'
+import TransferResponse from '../components/TransferResponse'
+import ReceiptLinkPanel from '../components/ReceiptLinkPanel'
+import { DisposeDialog, ReasonDialog } from '../components/LotActionDialogs'
+import { BatchStatusBadge } from '../components/BatchRow'
 import { buttonClass } from '../components/ui/Button'
 import { cardClass } from '../components/ui/Card'
 import { Skeleton, SkeletonCardList } from '../components/ui/Skeleton'
 
-/** Six-step progress: done / current / upcoming, so "where is this batch" reads at a glance. */
-function StageProgress({ current, recalled }: { current: TraceResult['batch']['currentStage']; recalled: boolean }) {
-  const currentIdx = current ? STAGE_ORDER.indexOf(current) : -1
+/** The lot's own workflow as a progress line: done / current / upcoming; optional steps dashed. */
+function StageProgress({ workflow, catalog, current, stopped }: { workflow: Workflow; catalog: Catalog; current: string | null; stopped: boolean }) {
+  const rules = catalog.rules(workflow.id)!
+  const at = rules.position(current)
   return (
-    <ol className="flex items-start" aria-label="Tiến độ chuỗi cung ứng">
-      {STAGE_ORDER.map((stage, i) => {
-        const Icon = STAGE_ICONS[stage]
-        const done = i <= currentIdx
-        const isNext = i === currentIdx + 1 && !recalled
+    <ol className="flex items-start overflow-x-auto pb-1" aria-label="Tiến độ theo quy trình">
+      {workflow.steps.map((step, i) => {
+        const Icon = stageIcon(step.stage)
+        const done = step.position <= at
+        const isNext = step.position === at + 1 && !stopped
         return (
-          <li key={stage} className="flex-1 flex flex-col items-center text-center min-w-0 relative">
+          <li key={step.stage} className="flex-1 flex flex-col items-center text-center min-w-[4.5rem] relative">
             {i > 0 && (
               <span
                 aria-hidden="true"
@@ -43,13 +55,14 @@ function StageProgress({ current, recalled }: { current: TraceResult['batch']['c
               />
             )}
             <span
-              className={`relative z-10 w-8 h-8 rounded-full flex items-center justify-center border-2 ${
+              className={`relative z-10 w-8 h-8 rounded-full flex items-center justify-center border-2 ${step.required ? '' : 'border-dashed'} ${
                 done
                   ? 'bg-emerald-500 border-emerald-500 text-white'
                   : isNext
                     ? 'bg-white dark:bg-slate-900 border-brand-500 text-brand-600 dark:text-brand-400 ring-4 ring-brand-100 dark:ring-brand-500/20'
                     : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-300 dark:text-slate-600'
               }`}
+              title={step.required ? 'Bắt buộc' : 'Có thể bỏ qua'}
             >
               {done ? <CheckCircle2 className="w-4 h-4" /> : <Icon className="w-4 h-4" />}
             </span>
@@ -58,7 +71,7 @@ function StageProgress({ current, recalled }: { current: TraceResult['batch']['c
                 done ? 'text-slate-700 dark:text-slate-200' : isNext ? 'text-brand-700 dark:text-brand-400 font-semibold' : 'text-slate-400 dark:text-slate-500'
               }`}
             >
-              {STAGE_LABELS[stage]}
+              {catalog.stageLabel(step.stage)}
             </span>
           </li>
         )
@@ -80,7 +93,7 @@ const FORMAT_NAMES: Record<ExportFormat, string> = { docx: 'Word', xlsx: 'Excel'
  * Every format is generated in the browser from the same report model
  * (lib/reports/model.ts) and only its library is downloaded on first use.
  */
-function ExportMenu({ result, actorsById, publicUrl }: { result: TraceResult; actorsById: Map<string, Actor>; publicUrl: string }) {
+function ExportMenu({ result, actorsById, publicUrl, catalog }: { result: TraceResult; actorsById: Map<string, Actor>; publicUrl: string; catalog: Catalog }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState<ExportFormat | null>(null)
   const [error, setError] = useState('')
@@ -104,7 +117,7 @@ function ExportMenu({ result, actorsById, publicUrl }: { result: TraceResult; ac
     setBusy(format)
     setError('')
     try {
-      const report = buildBatchReport(result, actorsById, publicUrl)
+      const report = buildBatchReport(result, actorsById, publicUrl, catalog)
       let blob: Blob
       if (format === 'docx') blob = await (await import('../lib/reports/docx')).buildBatchDocx(report)
       else blob = await (await import('../lib/reports/xlsx')).buildBatchXlsx(report)
@@ -130,7 +143,7 @@ function ExportMenu({ result, actorsById, publicUrl }: { result: TraceResult; ac
         <Download className="w-4 h-4" /> {busy ? `Đang tạo ${FORMAT_NAMES[busy]}...` : 'Xuất báo cáo'} <ChevronDown className="w-3.5 h-3.5" />
       </button>
       {open && (
-        <div role="menu" className="absolute right-0 mt-1 w-64 z-20 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-card-hover p-1">
+        <div role="menu" className="absolute left-0 mt-1 w-64 z-20 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-card-hover p-1">
           {EXPORT_OPTIONS.map((o) => (
             <button
               key={o.format}
@@ -146,7 +159,7 @@ function ExportMenu({ result, actorsById, publicUrl }: { result: TraceResult; ac
         </div>
       )}
       {error && (
-        <p role="alert" className="absolute right-0 mt-1 text-xs text-rose-600 dark:text-rose-400 whitespace-nowrap">
+        <p role="alert" className="absolute left-0 mt-1 text-xs text-rose-600 dark:text-rose-400 whitespace-nowrap">
           {error}
         </p>
       )}
@@ -207,22 +220,25 @@ export default function BatchDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const location = useLocation()
-  const [searchParams, setSearchParams] = useSearchParams()
   const { actor } = useAuth()
+  const { catalog } = useCatalog()
   const [result, setResult] = useState<TraceResult | null>(null)
+  const [custody, setCustody] = useState<CustodyView>()
   const [actors, setActors] = useState<Actor[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [recallOpen, setRecallOpen] = useState(false)
+  const [dialog, setDialog] = useState<'recall' | 'hold' | 'release' | 'dispose' | null>(null)
   const [flash, setFlash] = useState<string>((location.state as { flash?: string } | null)?.flash ?? '')
 
   const load = useCallback(() => {
     if (!id) return
     setLoading(true)
     setError('')
-    traceApi
-      .get(id)
-      .then(setResult)
+    Promise.all([traceApi.get(id), batchApi.custodyOf(id).catch(() => undefined)])
+      .then(([r, c]) => {
+        setResult(r)
+        setCustody(c)
+      })
       .catch((err) => setError(apiErrorMessage(err, 'Không thể tải thông tin lô hàng.')))
       .finally(() => setLoading(false))
   }, [id])
@@ -233,22 +249,18 @@ export default function BatchDetail() {
   }, [load])
 
   const actorsById = useMemo(() => new Map(actors.map((a) => [a.id, a])), [actors])
-  const canRecall = actor?.role === 'ADMIN' || actor?.role === 'INSPECTOR'
-
-  // Arriving from a failed quality check: offer the recall straight away.
-  useEffect(() => {
-    if (searchParams.get('recall') === 'suggest' && result && canRecall && !result.batch.isRecalled) setRecallOpen(true)
-  }, [searchParams, result, canRecall])
+  const oversight = actor?.role === 'ADMIN' || actor?.role === 'INSPECTOR'
 
   useEffect(() => {
     if (!flash) return
-    const t = setTimeout(() => setFlash(''), 4000)
+    const t = setTimeout(() => setFlash(''), 5000)
     return () => clearTimeout(t)
   }, [flash])
 
-  const closeRecall = () => {
-    setRecallOpen(false)
-    if (searchParams.has('recall')) setSearchParams({}, { replace: true })
+  const done = (message: string) => {
+    setDialog(null)
+    setFlash(message)
+    load()
   }
 
   const header = (title: string, right?: ReactNode) => (
@@ -266,10 +278,10 @@ export default function BatchDetail() {
     </header>
   )
 
-  if (loading && !result) {
+  if ((loading && !result) || !catalog) {
     return (
       <div className="page-shell">
-        <main className="max-w-2xl mx-auto p-4 sm:p-6 space-y-4">
+        <main className="page-container space-y-4">
           <Skeleton className="h-8 w-1/3" />
           <Skeleton className="h-32 w-full" />
           <SkeletonCardList rows={4} />
@@ -282,7 +294,7 @@ export default function BatchDetail() {
     return (
       <div className="page-shell">
         {header('Lô hàng')}
-        <main className="max-w-2xl mx-auto p-4">
+        <main className="page-container">
           <div className={cardClass({ className: 'text-center py-10' })}>
             <p className="text-rose-500 dark:text-rose-400 text-sm mb-4">{error || 'Không tìm thấy lô hàng.'}</p>
             <Link to="/dashboard" className={buttonClass('secondary', 'sm')}>
@@ -296,24 +308,35 @@ export default function BatchDetail() {
 
   const { batch, events, anomalies, isValid } = result
   const publicUrl = `${window.location.origin}/provenance/${batch.id}`
-  const next = nextStageOf(batch)
+  const rules = catalog.rules(batch.workflowId)
+  const category = catalog.categoryOf(batch)
+  const next = nextStepLabel(batch, catalog)
   const custodian = batch.assignedToActorId ? actorsById.get(batch.assignedToActorId) : undefined
-  const mine = actor ? canActOn(actor, batch) : false
+  const mine = actor ? canActOn(actor, batch, catalog) : false
   const openAnomalies = anomalies.filter((a) => !a.resolved)
   const waitingSince = batch.lastEventAt ?? batch.createdAt
+  const pending = custody?.transfers.find((t) => t.status === 'PENDING')
+  const forMe = pending && actor && (pending.toActorId === actor.id || actor.role === 'ADMIN') ? pending : undefined
+  const openHold = custody?.holds.find((h) => !h.releasedAt)
+  const remaining = remainingOf(batch)
+  const holder = batch.assignedToActorId ?? actor?.id
+  const canHandleRejected = !!actor && batch.status === 'REJECTED' && (actor.role === 'ADMIN' || holder === actor.id)
+  const atExport = !!batch.currentStage && rules?.kind(batch.currentStage) === 'EXPORT' && batch.status === 'ACTIVE'
+  const exportData = atExport ? [...events].reverse().find((e) => e.kind === 'OBSERVE' && e.stage === batch.currentStage)?.data : undefined
+  const stopped = ['RECALLED', 'DESTROYED', 'REJECTED', 'ON_HOLD', 'CONSUMED'].includes(batch.status)
 
   return (
     <div className="page-shell">
       {header(batch.productName, <VerifyBadge isValid={isValid} hasAnomalies={openAnomalies.length > 0} />)}
 
-      <main className="max-w-2xl mx-auto p-4 space-y-4">
+      <main className="page-container space-y-4">
         {flash && (
           <div role="status" className="bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 text-emerald-800 dark:text-emerald-300 text-sm rounded-xl px-3.5 py-2.5 flex items-center gap-2 animate-scale-in">
             <CheckCircle2 className="w-4 h-4 flex-shrink-0" /> {flash}
           </div>
         )}
 
-        {batch.isRecalled && (
+        {batch.status === 'RECALLED' && (
           <div className="bg-rose-50 dark:bg-rose-500/10 border-2 border-rose-200 dark:border-rose-500/30 rounded-2xl p-4 text-rose-800 dark:text-rose-300 flex gap-3">
             <Siren className="w-5 h-5 flex-shrink-0" />
             <div className="text-sm">
@@ -322,99 +345,234 @@ export default function BatchDetail() {
             </div>
           </div>
         )}
-
-        {/* Status: what is it, where is it, who has it, what's next */}
-        <section className={cardClass({ className: 'space-y-4' })}>
-          <div className="flex items-start justify-between gap-3 flex-wrap">
-            <div className="min-w-0">
-              <p className="text-sm text-slate-500 dark:text-slate-400">
-                {batch.productType} · {batch.origin}
-              </p>
-              <p className="text-lg font-semibold text-slate-900 dark:text-slate-50">
-                {batch.quantity.toLocaleString('vi-VN')} {batch.unit}
-              </p>
+        {batch.status === 'DESTROYED' && (
+          <div className="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl p-4 text-slate-700 dark:text-slate-300 flex gap-3 text-sm">
+            <Trash2 className="w-5 h-5 flex-shrink-0" /> Lô đã được huỷ có biên bản — xem chi tiết ở cuối hành trình.
+          </div>
+        )}
+        {batch.status === 'ON_HOLD' && (
+          <div className="bg-amber-50 dark:bg-amber-500/10 border-2 border-amber-200 dark:border-amber-500/30 rounded-2xl p-4 text-amber-800 dark:text-amber-300 flex gap-3">
+            <PauseCircle className="w-5 h-5 flex-shrink-0" />
+            <div className="text-sm flex-1">
+              <p className="font-semibold">Lô đang bị tạm giữ chờ điều tra</p>
+              {openHold && (
+                <p className="mt-0.5">
+                  {openHold.reason} · từ {formatDateTime(openHold.heldAt)}
+                </p>
+              )}
+              <p className="mt-1 text-xs">Không ai ghi khâu, bàn giao hay dùng lô này cho tới khi kiểm định viên / quản trị viên giải toả.</p>
             </div>
-            <Badge tone={batch.isRecalled ? 'danger' : next ? 'brand' : 'success'}>
-              {batch.isRecalled ? 'Đã thu hồi' : next ? `Chờ ${STAGE_LABELS[next].toLowerCase()}` : 'Đã hoàn tất'}
-            </Badge>
+            {oversight && (
+              <button type="button" onClick={() => setDialog('release')} className={buttonClass('secondary', 'sm', 'self-start')}>
+                <PlayCircle className="w-3.5 h-3.5" /> Giải toả…
+              </button>
+            )}
+          </div>
+        )}
+        {batch.status === 'REJECTED' && (
+          <div className="bg-rose-50 dark:bg-rose-500/10 border-2 border-rose-200 dark:border-rose-500/30 rounded-2xl p-4 text-rose-800 dark:text-rose-300 space-y-3">
+            <div className="flex gap-3">
+              <TriangleAlert className="w-5 h-5 flex-shrink-0" />
+              <div className="text-sm">
+                <p className="font-semibold">Lô không đạt kiểm định</p>
+                <p className="mt-0.5">Không đi tiếp được. Ba cách xử lý: chế biến lại (rồi kiểm định lại), hạ loại, hoặc huỷ có biên bản.</p>
+              </div>
+            </div>
+            {canHandleRejected && (
+              <div className="flex flex-wrap gap-2">
+                <Link to={`/lots/transform?kind=REWORK&lotId=${batch.id}`} className={buttonClass('secondary', 'sm')}>
+                  <Recycle className="w-3.5 h-3.5" /> Chế biến lại
+                </Link>
+                <Link to={`/lots/transform?kind=DOWNGRADE&lotId=${batch.id}`} className={buttonClass('secondary', 'sm')}>
+                  Hạ loại
+                </Link>
+                <button type="button" onClick={() => setDialog('dispose')} className={buttonClass('danger', 'sm')}>
+                  <Trash2 className="w-3.5 h-3.5" /> Huỷ lô…
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {forMe && (
+          <section className={cardClass({ className: 'space-y-2 border-sky-300 dark:border-sky-500/40 ring-2 ring-sky-100 dark:ring-sky-500/10' })}>
+            <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
+              <Inbox className="w-4 h-4 text-sky-500" /> Lô này đang được bàn giao cho bạn
+            </h2>
+            <TransferResponse
+              transfer={forMe}
+              tolerance={catalog.settingsFor(batch.productTypeId).transitLossTolerance}
+              onDone={() => done('Đã gửi xác nhận bàn giao.')}
+            />
+          </section>
+        )}
+
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 items-start">
+          <div className="xl:col-span-2 space-y-4 min-w-0">
+            {/* Status: what is it, where is it, who has it, what's next */}
+            <section className={cardClass({ className: 'space-y-4' })}>
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div className="min-w-0">
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    {batch.productType} · {batch.origin}
+                    {rules && <span> · quy trình {rules.workflow.name}</span>}
+                  </p>
+                  <p className="text-lg font-semibold text-slate-900 dark:text-slate-50">
+                    {batch.quantity.toLocaleString('vi-VN')} {batch.unit}
+                    {batch.unit !== batch.baseUnit && batch.quantityBase !== undefined && (
+                      <span className="text-sm font-normal text-slate-500">
+                        {' '}
+                        = {batch.quantityBase.toLocaleString('vi-VN')} {batch.baseUnit}
+                      </span>
+                    )}
+                  </p>
+                  {(batch.consumedQuantity > 0 || batch.lostQuantity > 0) && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                      Còn {remaining.toLocaleString('vi-VN')} {batch.unit}
+                      {batch.consumedQuantity > 0 && ` · đã dùng ${batch.consumedQuantity.toLocaleString('vi-VN')}`}
+                      {batch.lostQuantity > 0 && ` · hao hụt ${batch.lostQuantity.toLocaleString('vi-VN')}`}
+                    </p>
+                  )}
+                </div>
+                <BatchStatusBadge batch={batch} />
+              </div>
+
+              {rules && <StageProgress workflow={rules.workflow} catalog={catalog} current={batch.currentStage} stopped={stopped} />}
+
+              {batch.status === 'ACTIVE' && next && (
+                <div className="flex items-center justify-between gap-3 flex-wrap pt-1">
+                  <p className="text-sm text-slate-600 dark:text-slate-300 flex items-center gap-1.5 min-w-0">
+                    <Clock3 className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                    <span>
+                      {mine ? (
+                        <strong className="text-brand-700 dark:text-brand-400">Đang chờ bạn</strong>
+                      ) : custodian ? (
+                        <>
+                          Đang do <strong>{custodian.organization}</strong> ({ROLE_LABELS[custodian.role].toLowerCase()}) giữ
+                        </>
+                      ) : (
+                        'Chưa giao cho ai'
+                      )}{' '}
+                      · từ {relativeDays(waitingSince)}
+                    </span>
+                  </p>
+                  {mine && (
+                    <Link to={`/record?batchId=${batch.id}`} className={buttonClass('primary', 'md')}>
+                      Xử lý: {next}
+                    </Link>
+                  )}
+                </div>
+              )}
+            </section>
+
+            {openAnomalies.length > 0 && (
+              <section className="bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/20 rounded-2xl p-4">
+                <h2 className="text-sm font-semibold text-amber-800 dark:text-amber-400 mb-2">Cảnh báo chưa xử lý ({openAnomalies.length})</h2>
+                <ul className="space-y-1">
+                  {openAnomalies.map((a) => (
+                    <li key={a.id} className="text-sm text-amber-700 dark:text-amber-400/90 flex gap-2">
+                      <TriangleAlert className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                      <span>{a.message}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+
+            <Timeline events={events} actorsById={actorsById} catalog={catalog} categoryCode={category} />
           </div>
 
-          <StageProgress current={batch.currentStage} recalled={batch.isRecalled} />
-
-          {!batch.isRecalled && next && (
-            <div className="flex items-center justify-between gap-3 flex-wrap pt-1">
-              <p className="text-sm text-slate-600 dark:text-slate-300 flex items-center gap-1.5 min-w-0">
-                <Clock3 className="w-4 h-4 text-slate-400 flex-shrink-0" />
-                <span>
-                  {mine ? (
-                    <strong className="text-brand-700 dark:text-brand-400">Đang chờ bạn</strong>
-                  ) : custodian ? (
-                    <>
-                      Đang chờ <strong>{custodian.organization}</strong> ({ROLE_LABELS[custodian.role].toLowerCase()})
-                    </>
-                  ) : (
-                    'Chưa giao cho ai'
-                  )}{' '}
-                  · từ {relativeDays(waitingSince)}
-                </span>
-              </p>
-              {mine && (
-                <Link to={`/record?batchId=${batch.id}`} className={buttonClass('primary', 'md')}>
-                  Xử lý: {STAGE_LABELS[next]}
-                </Link>
-              )}
+          {/* Side column: what you can do with this lot. */}
+          <aside className="space-y-4 min-w-0">
+            <div className="flex gap-2 flex-wrap items-center">
+              <ExportMenu result={result} actorsById={actorsById} publicUrl={publicUrl} catalog={catalog} />
             </div>
-          )}
-        </section>
 
-        {openAnomalies.length > 0 && (
-          <section className="bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/20 rounded-2xl p-4">
-            <h2 className="text-sm font-semibold text-amber-800 dark:text-amber-400 mb-2">Cảnh báo chưa xử lý ({openAnomalies.length})</h2>
-            <ul className="space-y-1">
-              {openAnomalies.map((a) => (
-                <li key={a.id} className="text-sm text-amber-700 dark:text-amber-400/90 flex gap-2">
-                  <TriangleAlert className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                  <span>{a.message}</span>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
+            {actor && !forMe && (batch.status === 'ACTIVE' || batch.status === 'REJECTED' || batch.status === 'IN_TRANSIT') && !mine && (
+              <HandOffPanel batch={batch} actors={actors} custody={custody} me={actor} onDone={() => done('Đã cập nhật bàn giao.')} />
+            )}
 
-        <div className="flex gap-2 flex-wrap items-center justify-end">
-          <ExportMenu result={result} actorsById={actorsById} publicUrl={publicUrl} />
+            {atExport && (actor?.role === 'EXPORTER' || actor?.role === 'ADMIN') && (
+              <ReceiptLinkPanel batchId={batch.id} importerName={typeof exportData?.importerName === 'string' ? exportData.importerName : undefined} />
+            )}
+
+            <LineagePanel batch={batch} />
+
+            <QrPanel batchId={batch.id} publicUrl={publicUrl} />
+
+            <VerifyPanel batchId={batch.id} />
+
+            {oversight && !['RECALLED', 'DESTROYED'].includes(batch.status) && (
+              <section className={cardClass({ className: 'border-rose-200/80 dark:border-rose-500/20 space-y-3' })}>
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Kiểm soát lô hàng</h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                    Tạm giữ để điều tra (giải toả được), hoặc thu hồi — lan theo phả hệ, báo cho đối tác và hiện trên trang công khai.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {['ACTIVE', 'IN_TRANSIT', 'REJECTED'].includes(batch.status) && (
+                    <button type="button" onClick={() => setDialog('hold')} className={buttonClass('secondary', 'sm')}>
+                      <PauseCircle className="w-3.5 h-3.5" /> Tạm giữ…
+                    </button>
+                  )}
+                  <button type="button" onClick={() => setDialog('recall')} className={buttonClass('danger', 'sm')}>
+                    Thu hồi lô hàng…
+                  </button>
+                  {['ACTIVE', 'ON_HOLD', 'REJECTED'].includes(batch.status) && !canHandleRejected && (
+                    <button type="button" onClick={() => setDialog('dispose')} className={buttonClass('ghost', 'sm')}>
+                      <Trash2 className="w-3.5 h-3.5" /> Huỷ lô…
+                    </button>
+                  )}
+                </div>
+              </section>
+            )}
+            {batch.status === 'RECALLED' && oversight && (
+              <button type="button" onClick={() => setDialog('dispose')} className={buttonClass('ghost', 'sm')}>
+                <Trash2 className="w-3.5 h-3.5" /> Ghi nhận huỷ lô đã thu hồi…
+              </button>
+            )}
+
+            <p className="text-[11px] text-slate-300 dark:text-slate-600 font-mono break-all">Mã lô: {batch.id}</p>
+          </aside>
         </div>
-
-        <Timeline events={events} actorsById={actorsById} />
-
-        <QrPanel batchId={batch.id} publicUrl={publicUrl} />
-
-        {canRecall && !batch.isRecalled && (
-          <section className={cardClass({ className: 'border-rose-200/80 dark:border-rose-500/20' })}>
-            <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Thu hồi lô hàng</h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 mb-3">
-              Dừng mọi khâu tiếp theo, báo cho các đối tác và hiển thị cảnh báo trên trang công khai. Không thể hoàn tác.
-            </p>
-            <button type="button" onClick={() => setRecallOpen(true)} className={buttonClass('danger', 'sm')}>
-              Thu hồi lô hàng…
-            </button>
-          </section>
-        )}
-
-        <p className="text-center text-[11px] text-slate-300 dark:text-slate-600 font-mono break-all">Mã lô: {batch.id}</p>
       </main>
 
       <RecallDialog
         batch={batch}
-        open={recallOpen}
-        onClose={closeRecall}
-        initialReason={searchParams.get('recall') === 'suggest' ? 'Không đạt kiểm định chất lượng' : undefined}
-        onRecalled={() => {
-          closeRecall()
-          setFlash('Đã thu hồi lô hàng và thông báo cho các đối tác.')
-          load()
+        open={dialog === 'recall'}
+        onClose={() => setDialog(null)}
+        onRecalled={(outcome) => {
+          const parts = ['Đã thu hồi lô hàng và thông báo cho các đối tác']
+          if (outcome.lineage.recalledLotIds.length) parts.push(`${outcome.lineage.recalledLotIds.length} lô làm ra từ lô này cũng bị thu hồi`)
+          if (outcome.lineage.heldLotIds.length) parts.push(`${outcome.lineage.heldLotIds.length} lô làm ra từ lô này bị tạm giữ`)
+          if (outcome.lineage.flaggedLotIds.length) parts.push(`${outcome.lineage.flaggedLotIds.length} lô liên quan được gắn cờ điều tra`)
+          done(parts.join('; ') + '.')
         }}
       />
+      <ReasonDialog
+        open={dialog === 'hold'}
+        title="Tạm giữ lô hàng"
+        description="Lô sẽ bị đóng băng — không ghi khâu, không bàn giao, không dùng làm nguyên liệu — cho tới khi được giải toả. Việc tạm giữ được ghi vào chuỗi."
+        confirmLabel="Tạm giữ"
+        onClose={() => setDialog(null)}
+        onConfirm={async (reason) => {
+          await batchApi.hold(batch.id, reason)
+          done('Đã tạm giữ lô hàng.')
+        }}
+      />
+      <ReasonDialog
+        open={dialog === 'release'}
+        title="Giải toả lô hàng"
+        description="Lô trở lại trạng thái trước khi bị tạm giữ. Ghi rõ kết quả điều tra — lý do được ghi vào chuỗi."
+        confirmLabel="Giải toả"
+        onClose={() => setDialog(null)}
+        onConfirm={async (reason) => {
+          await batchApi.release(batch.id, reason)
+          done('Đã giải toả lô hàng.')
+        }}
+      />
+      <DisposeDialog batch={batch} open={dialog === 'dispose'} onClose={() => setDialog(null)} onDone={() => done('Đã huỷ lô hàng có biên bản.')} />
     </div>
   )
 }

@@ -13,6 +13,8 @@ import {
   RefreshTokenRecord,
   StatsByDay,
   StatsByOrigin,
+  StatsByStage,
+  LotStatus,
   StatsOverview,
   SupplyChainStage,
   Tenant,
@@ -70,12 +72,21 @@ export interface BatchExportFilters {
   origin?: string;
 }
 
-/** A batch as the application creates it — the chain head starts at genesis and is owned by the database. */
-export type NewBatch = Omit<Batch, 'headHash' | 'eventCount'>;
+/**
+ * A batch as the application creates it — the chain head starts at genesis
+ * and is owned by the database, a new lot is ACTIVE with nothing consumed or
+ * lost, and the derived columns are computed by Postgres.
+ */
+export type NewBatch = Omit<
+  Batch,
+  'headHash' | 'eventCount' | 'consumedQuantity' | 'lostQuantity' | 'status' | 'isRecalled' | 'quantityBase' | 'recallReason'
+>;
 
 export interface IBatchRepo {
   create(batch: NewBatch): Promise<Batch>;
   findById(id: string): Promise<Batch | null>;
+  /** Many lots in one round-trip (lineage graphs can span hundreds). */
+  findByIds(ids: string[]): Promise<Batch[]>;
   /** Same as findById but takes a row lock until the surrounding transaction ends. */
   findByIdForUpdate(id: string): Promise<Batch | null>;
   /** Pre-tenant: the tenant that owns a batch, for public QR/provenance lookups. */
@@ -83,15 +94,23 @@ export interface IBatchRepo {
   hasAnyInTenant(tenantId: string): Promise<boolean>;
   findPageByTenant(tenantId: string, query: BatchListQuery): Promise<PaginatedResult<Batch>>;
   findForExport(tenantId: string, filters: BatchExportFilters): Promise<Batch[]>;
-  /** Non-recalled batches whose NEXT stage is in `allowedStages` and that this actor may act on. */
-  findPendingFor(tenantId: string, actorId: string, allowedStages: SupplyChainStage[], isAdmin: boolean): Promise<Batch[]>;
+  /** Open lots not yet at the end of their workflow that this actor holds, or that nobody holds and whose next step is theirs. */
+  findPendingFor(tenantId: string, actorId: string, role: ActorRole, isAdmin: boolean): Promise<Batch[]>;
+  /** Open lots (recorded, ACTIVE or REJECTED, goods remaining) this actor holds — all open lots for ADMIN. */
+  findInCustody(tenantId: string, actorId: string, isAdmin: boolean): Promise<Batch[]>;
   /** Batches the actor created, currently holds, or recorded any event on. */
   findInvolving(tenantId: string, actorId: string): Promise<Batch[]>;
   /** Keyset-paginated walk over a tenant's batches (for integrity scans). */
   findPageAfter(tenantId: string, afterId: string | null, limit: number): Promise<Batch[]>;
   advanceStage(id: string, stage: SupplyChainStage, assignedToActorId: string | null): Promise<void>;
-  /** Atomically recalls a not-yet-recalled batch; null if it doesn't exist or was already recalled. */
-  markRecalled(id: string, reason: string): Promise<Batch | null>;
+  /** Changes custody only (no stage change). */
+  reassign(id: string, assignedToActorId: string | null): Promise<void>;
+  /** Changes status (transition checked by the database), optionally custody and lost quantity too. */
+  setStatus(
+    id: string,
+    status: LotStatus,
+    opts?: { assignedToActorId?: string | null; addLost?: number; recallReason?: string },
+  ): Promise<Batch>;
 }
 
 export interface IEventRepo {
@@ -99,6 +118,8 @@ export interface IEventRepo {
   findByBatchId(batchId: string): Promise<TraceEvent[]>;
   /** Events of several batches, ordered by batch then sequence number. */
   findByBatchIds(batchIds: string[]): Promise<TraceEvent[]>;
+  lastOccurredAt(batchId: string): Promise<Date | undefined>;
+  lastOccurredAtAmong(batchIds: string[]): Promise<Date | undefined>;
 }
 
 export interface IAnomalyRepo {
@@ -135,9 +156,10 @@ export interface IRefreshTokenRepo {
 
 export interface IStatsRepo {
   overview(tenantId: string): Promise<StatsOverview>;
-  eventCountByStage(tenantId: string): Promise<Partial<Record<SupplyChainStage, number>>>;
+  /** Stage records per stage, in display order. */
+  eventCountByStage(tenantId: string): Promise<StatsByStage[]>;
   batchesPerDay(tenantId: string, days: number): Promise<StatsByDay[]>;
   byOrigin(tenantId: string): Promise<StatsByOrigin[]>;
-  /** Non-recalled, unfinished batches with no activity for `stalledAfterDays`, plus open anomaly count. */
+  /** ACTIVE, unfinished batches with no activity for `stalledAfterDays`, plus counts of what else needs a person. */
   attention(tenantId: string, stalledAfterDays: number, limit: number): Promise<AttentionSummary>;
 }

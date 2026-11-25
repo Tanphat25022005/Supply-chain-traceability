@@ -60,7 +60,7 @@ describe('row-level security', () => {
     const a = await seedBatchWithEvent(t);
     const b = await seedBatchWithEvent(t);
     const result = await t.db.withTenant(a.tenant.id, () =>
-      t.db.query("UPDATE batches SET recall_reason = 'x', is_recalled = true WHERE id = $1", [b.batch.id]),
+      t.db.query("UPDATE batches SET recall_reason = 'x', status = 'RECALLED' WHERE id = $1", [b.batch.id]),
     );
     expect(result.rowCount).toBe(0);
   });
@@ -75,8 +75,8 @@ describe('composite tenant foreign keys', () => {
     // Even bypassing RLS entirely (superuser), the FK on (created_by, tenant_id) holds.
     await expect(
       t.ownerPool.query(
-        `INSERT INTO batches (id, product_name, product_type, origin, quantity, unit, created_by, tenant_id)
-         VALUES ($1, 'x', 'x', 'x', 1, 'kg', $2, $3)`,
+        `INSERT INTO batches (id, product_name, product_type, origin, quantity, unit, created_by, tenant_id, workflow_id)
+         VALUES ($1, 'x', 'x', 'x', 1, 'kg', $2, $3, (SELECT id FROM workflow_templates WHERE code = 'GENERIC_RETAIL'))`,
         [uuidv4(), outsider.id, a.id],
       ),
     ).rejects.toThrow(/batches_created_by_fkey/);
@@ -131,9 +131,9 @@ describe('chain linkage enforced at INSERT', () => {
     return t.db.withTenant(tenantId, () =>
       t.db.query(
         `INSERT INTO trace_events (id, batch_id, tenant_id, stage, actor_id, location, data, hash, prev_hash,
-                                   sequence_number, hash_version, salt)
-         VALUES ($1, $2, $3, 'PROCESSING', $4, 'x', '{}', $5, $6, $7, 2, $8)`,
-        [uuidv4(), batchId, tenantId, actorId, 'e'.repeat(64), prevHash, seq, 'a'.repeat(64)],
+                                   sequence_number, hash_version, salt, timestamp, occurred_at)
+         VALUES ($1, $2, $3, 'PROCESSING', $4, 'x', '{}', $5, $6, $7, 2, $8, $9, $9)`,
+        [uuidv4(), batchId, tenantId, actorId, 'e'.repeat(64), prevHash, seq, 'a'.repeat(64), new Date()],
       ),
     );
   }
@@ -160,8 +160,8 @@ describe('chain linkage enforced at INSERT', () => {
 
     await expect(insertEvent(t, tenant.id, batch.id, admin.id, 1, event.hash)).rejects.toThrow(/recalled/);
     await expect(
-      t.db.withTenant(tenant.id, () => t.db.query('UPDATE batches SET is_recalled = false WHERE id = $1', [batch.id])),
-    ).rejects.toThrow(/cannot be undone/);
+      t.db.withTenant(tenant.id, () => t.db.query("UPDATE batches SET status = 'ACTIVE' WHERE id = $1", [batch.id])),
+    ).rejects.toThrow(/status cannot change from RECALLED to ACTIVE/);
   });
 
   it('rejects regressing current_stage', async () => {

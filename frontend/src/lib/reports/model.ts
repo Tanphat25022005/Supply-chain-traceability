@@ -1,5 +1,18 @@
-import { Actor, Batch, ROLE_LABELS, STAGE_LABELS, SupplyChainStage, TraceResult, SEVERITY_LABELS } from '../../api/client'
-import { describeEventData } from '../../domain/stageFields'
+import {
+  Actor,
+  Batch,
+  CUSTODY_EVENT_LABELS,
+  CustodyEventKind,
+  isStageEvent,
+  ROLE_LABELS,
+  SEVERITY_LABELS,
+  stageLabel,
+  STATUS_LABELS,
+  SupplyChainStage,
+  TraceResult,
+  TRANSFORMATION_LABELS,
+} from '../../api/client'
+import { Catalog, describeEventData } from '../../domain/catalog'
 
 /**
  * One source of truth for every downloadable report (PDF, Word, Excel), so the
@@ -51,7 +64,10 @@ export interface ReportStep {
   index: number
   stage: SupplyChainStage
   stageLabel: string
+  /** When it happened (occurredAt) — what a reader means by "time". */
   time: Date
+  /** When it was written to the ledger; differs from `time` for late entries. */
+  recordedAt: Date
   organization: string
   person: string
   role: string
@@ -75,14 +91,30 @@ export interface BatchReport {
   fileBase: string
 }
 
-export function batchStatusText(batch: Pick<Batch, 'isRecalled' | 'recallReason' | 'currentStage'>): string {
-  if (batch.isRecalled) return `Đã thu hồi — ${batch.recallReason ?? ''}`.trim()
+export function batchStatusText(batch: Pick<Batch, 'isRecalled' | 'recallReason' | 'currentStage'> & Partial<Pick<Batch, 'status'>>): string {
+  if (batch.isRecalled || batch.status === 'RECALLED') return `Đã thu hồi — ${batch.recallReason ?? ''}`.replace(/ — $/, '')
+  if (batch.status && batch.status !== 'ACTIVE') return STATUS_LABELS[batch.status]
   if (!batch.currentStage) return 'Chưa bắt đầu'
   if (batch.currentStage === 'RETAIL') return 'Hoàn tất (đã đến điểm bán lẻ)'
-  return `Đang lưu thông — khâu gần nhất: ${STAGE_LABELS[batch.currentStage]}`
+  if (batch.currentStage === 'IMPORT_RECEIPT') return 'Hoàn tất (bên nhập khẩu đã nhận hàng)'
+  return `Đang lưu thông — khâu gần nhất: ${stageLabel(batch.currentStage)}`
 }
 
-export function buildBatchReport(result: TraceResult, actorsById: Map<string, Actor>, publicUrl: string): BatchReport {
+/** "Chế biến", "Chế biến (gộp)", or a custody step such as "Tạm giữ (tại khâu Nhập kho)". */
+function stepLabel(kind: string, stage: string, catalog?: Catalog): string {
+  const label = catalog?.stageLabel(stage) ?? stageLabel(stage)
+  if (!isStageEvent(kind as never)) return `${CUSTODY_EVENT_LABELS[kind as CustodyEventKind] ?? kind} (tại khâu ${label})`
+  const transform = (TRANSFORMATION_LABELS as Record<string, string>)[kind]
+  return kind === 'OBSERVE' || !transform ? label : `${label} (${transform.toLowerCase()})`
+}
+
+/** "Ghi nhận muộn lúc …" when the step was entered more than 10 minutes after it happened. */
+export function lateNote(step: Pick<ReportStep, 'time' | 'recordedAt'>): string {
+  return step.recordedAt.getTime() - step.time.getTime() > 10 * 60 * 1000 ? `Ghi nhận muộn lúc ${formatDateTime(step.recordedAt)}` : ''
+}
+
+export function buildBatchReport(result: TraceResult, actorsById: Map<string, Actor>, publicUrl: string, catalog?: Catalog): BatchReport {
+  const category = catalog?.categoryOf(result.batch)
   const { batch, events, anomalies, isValid } = result
   return {
     title: 'Báo cáo hành trình lô hàng',
@@ -101,13 +133,14 @@ export function buildBatchReport(result: TraceResult, actorsById: Map<string, Ac
         return {
           index: i + 1,
           stage: e.stage,
-          stageLabel: STAGE_LABELS[e.stage],
-          time: new Date(e.timestamp),
+          stageLabel: stepLabel(e.kind, e.stage, catalog),
+          time: new Date(e.occurredAt ?? e.timestamp),
+          recordedAt: new Date(e.timestamp),
           organization: actor?.organization ?? 'Không rõ',
           person: actor?.name ?? '',
           role: actor ? ROLE_LABELS[actor.role] : '',
           location: e.location,
-          facts: describeEventData(e.stage, e.data ?? {}).map(({ label, value }) => ({ label, value })),
+          facts: describeEventData(catalog?.fieldsForEvent(e, category) ?? [], e.data ?? {}).map(({ label, value }) => ({ label, value })),
           notes: e.notes ?? '',
           hash: e.hash,
         }

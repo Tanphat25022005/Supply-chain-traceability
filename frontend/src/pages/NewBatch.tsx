@@ -1,32 +1,43 @@
-import { FormEvent, useCallback, useEffect, useState } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Sprout } from 'lucide-react'
+import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, Navigate, useNavigate } from 'react-router-dom'
+import { ArrowLeft, Search, Sprout } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
-import { actorsApi, Actor, batchApi, Batch, eventApi } from '../api/client'
-import { PRODUCT_TYPES, UNITS } from '../domain/stageFields'
+import { useCatalog } from '../context/CatalogContext'
+import { actorsApi, Actor, batchApi, Batch, eventApi, Plot, plotsApi } from '../api/client'
+import { toEventData, toLocalInput } from '../domain/catalog'
 import { apiErrorMessage } from '../lib/apiError'
-import StageFieldsInput, { StageValues, toEventData } from '../components/StageFieldsInput'
+import StageFieldsInput, { StageValues } from '../components/StageFieldsInput'
 import HandoffSelect from '../components/HandoffSelect'
+import OccurredAtInput, { isLate, occurredAtToIso } from '../components/OccurredAtInput'
+import WorkflowSteps from '../components/WorkflowSteps'
 import Button from '../components/ui/Button'
 import { inputClass, labelClass } from '../components/ui/field'
 import { cardClass } from '../components/ui/Card'
 
 /**
- * Creating a batch IS its harvest: one form, one place name (the farm — no
- * separate "origin" vs "location"), product type and unit picked from fixed
- * lists so reports group cleanly, then handed straight to a processor.
+ * Creating a lot IS its first step (the harvest): product type, unit and
+ * workflow come from the catalog — so reports group cleanly, every unit
+ * converts to kg, and the lot knows which steps it must go through — then
+ * it is handed to whoever does the next step, who confirms receipt.
  */
 export default function NewBatch() {
   const { actor } = useAuth()
+  const { catalog } = useCatalog()
   const navigate = useNavigate()
   const [actors, setActors] = useState<Actor[]>([])
 
   const [productName, setProductName] = useState('')
-  const [productType, setProductType] = useState('')
+  const [typeSearch, setTypeSearch] = useState('')
+  const [productTypeId, setProductTypeId] = useState('')
+  const [workflowCode, setWorkflowCode] = useState('')
   const [origin, setOrigin] = useState('')
+  const [plots, setPlots] = useState<Plot[]>([])
+  const [plotId, setPlotId] = useState('')
   const [quantity, setQuantity] = useState('')
   const [unit, setUnit] = useState('kg')
-  const [harvest, setHarvest] = useState<StageValues>({ harvestDate: new Date().toISOString().slice(0, 10) })
+  const [harvest, setHarvest] = useState<StageValues>({})
+  const [occurredAt, setOccurredAt] = useState(toLocalInput(new Date()))
+  const [lateReason, setLateReason] = useState('')
   const [notes, setNotes] = useState('')
   const [assignNextTo, setAssignNextTo] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -39,12 +50,41 @@ export default function NewBatch() {
 
   useEffect(() => {
     actorsApi.list().then(setActors).catch(() => {})
+    plotsApi.list().then(setPlots).catch(() => {})
   }, [])
+
+  const productType = catalog?.productType(productTypeId)
+  const units = catalog?.unitsFor(productTypeId) ?? []
+  const workflows = catalog?.workflowsFor(productType?.categoryCode) ?? []
+  const workflow = workflows.find((w) => w.code === workflowCode) ?? workflows.find((w) => w.code === productType?.defaultWorkflowCode) ?? workflows[0]
+  const rules = catalog?.rules(workflow?.id)
+  const firstStage = rules?.steps[0]?.stage ?? 'HARVEST'
+  const fields = catalog?.currentSchema(productType?.categoryCode, firstStage)?.fields ?? []
+  const settings = catalog?.settingsFor(productTypeId) ?? { maxBackdateDays: 7 }
+  const nextRoles = rules ? [...rules.rolesForNext(1)] : []
+  const nextLabel = rules?.nextCandidates(1).map((s) => catalog!.stageLabel(s.stage).toLowerCase()).join(' hoặc ')
+  const selectedUnit = units.find((u) => u.code === unit)
+
+  const groups = useMemo(() => {
+    const q = typeSearch.trim().toLowerCase()
+    return (catalog?.productTypesByCategory() ?? [])
+      .map((g) => ({ ...g, types: g.types.filter((t) => !q || t.name.toLowerCase().includes(q) || t.aliases.some((a) => a.toLowerCase().includes(q))) }))
+      .filter((g) => g.types.length > 0)
+  }, [catalog, typeSearch])
 
   if (actor && actor.role !== 'FARMER' && !isAdmin) return <Navigate to="/tasks" replace />
 
+  const chooseType = (id: string) => {
+    setProductTypeId(id)
+    setWorkflowCode('')
+    setHarvest({})
+    const firstUnit = catalog?.unitsFor(id)[0]
+    setUnit(firstUnit?.code ?? 'kg')
+  }
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
+    if (!productType || !workflow) return
     setError('')
     setSubmitting(true)
     try {
@@ -52,21 +92,27 @@ export default function NewBatch() {
         created ??
         (await batchApi.create({
           productName: productName.trim(),
-          productType,
+          productTypeId: productType.id,
+          workflowCode: workflow.code,
           origin: origin.trim(),
+          plotId: plotId || undefined,
           quantity: Number(quantity),
           unit,
         }))
       setCreated(batch)
       await eventApi.record({
         batchId: batch.id,
-        stage: 'HARVEST',
+        stage: firstStage,
         location: batch.origin,
         notes: notes.trim() || undefined,
-        data: toEventData('HARVEST', harvest),
+        data: toEventData(fields, harvest),
+        occurredAt: occurredAtToIso(occurredAt),
+        lateReason: isLate(occurredAt, settings.maxBackdateDays) ? lateReason.trim() : undefined,
         assignNextTo: assignNextTo || undefined,
       })
-      navigate(`/batch/${batch.id}`, { state: { flash: 'Đã tạo lô hàng và ghi nhận thu hoạch.' } })
+      navigate(`/batch/${batch.id}`, {
+        state: { flash: assignNextTo ? 'Đã tạo lô hàng và ghi nhận thu hoạch. Lô đang chờ người nhận xác nhận.' : 'Đã tạo lô hàng và ghi nhận thu hoạch.' },
+      })
     } catch (err) {
       setError(
         created
@@ -92,40 +138,67 @@ export default function NewBatch() {
         <h1 className="font-semibold text-slate-900 dark:text-slate-50">Lô hàng mới</h1>
       </header>
 
-      <main className="max-w-lg mx-auto p-4">
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <fieldset disabled={!!created} className={cardClass({ padding: 'lg', className: 'space-y-4 disabled:opacity-70' })}>
-            <legend className="sr-only">Thông tin sản phẩm</legend>
-            <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Sản phẩm</h2>
-            <div>
-              <label htmlFor="productName" className={labelClass}>
-                Tên sản phẩm <span className="text-rose-500">*</span>
-              </label>
-              <input
-                id="productName"
-                value={productName}
-                onChange={(e) => setProductName(e.target.value)}
-                required
-                maxLength={200}
-                placeholder="VD: Cà phê Robusta Cầu Đất"
-                className={inputClass}
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="col-span-2 sm:col-span-1">
-                <label htmlFor="productType" className={labelClass}>
-                  Loại <span className="text-rose-500">*</span>
+      <main className="page-container">
+        {!catalog ? (
+          <p className="text-sm text-slate-500">Đang tải danh mục loại hàng…</p>
+        ) : (
+          <form onSubmit={handleSubmit} className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+            <fieldset disabled={!!created} className={cardClass({ padding: 'lg', className: 'space-y-4 disabled:opacity-70' })}>
+              <legend className="sr-only">Thông tin sản phẩm</legend>
+              <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Sản phẩm</h2>
+              <div>
+                <label htmlFor="productName" className={labelClass}>
+                  Tên lô <span className="text-rose-500">*</span>
                 </label>
-                <select id="productType" value={productType} onChange={(e) => setProductType(e.target.value)} required className={inputClass}>
-                  <option value="">— Chọn loại —</option>
-                  {PRODUCT_TYPES.map((t) => (
-                    <option key={t} value={t}>
-                      {t}
-                    </option>
+                <input
+                  id="productName"
+                  value={productName}
+                  onChange={(e) => setProductName(e.target.value)}
+                  required
+                  maxLength={200}
+                  placeholder="VD: Cà phê Robusta Cầu Đất đợt 1"
+                  className={inputClass}
+                />
+              </div>
+
+              <div>
+                <label htmlFor="productType" className={labelClass}>
+                  Loại hàng <span className="text-rose-500">*</span>
+                </label>
+                <div className="relative mb-2">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    aria-label="Tìm loại hàng"
+                    value={typeSearch}
+                    onChange={(e) => setTypeSearch(e.target.value)}
+                    placeholder="Tìm: cà phê, gạo, sầu riêng…"
+                    className={`${inputClass} pl-9`}
+                  />
+                </div>
+                <select id="productType" value={productTypeId} onChange={(e) => chooseType(e.target.value)} required className={inputClass}>
+                  <option value="">— Chọn loại hàng trong danh mục —</option>
+                  {groups.map((g) => (
+                    <optgroup key={g.category.code} label={g.category.name}>
+                      {g.types.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                          {t.tenantId ? ' (riêng của đơn vị)' : ''}
+                        </option>
+                      ))}
+                    </optgroup>
                   ))}
                 </select>
+                {isAdmin && (
+                  <p className="text-xs text-slate-400 mt-1">
+                    Thiếu loại hàng?{' '}
+                    <Link to="/admin/catalog" className="text-brand-600 dark:text-brand-400 underline">
+                      Thêm vào danh mục
+                    </Link>
+                  </p>
+                )}
               </div>
-              <div className="col-span-2 sm:col-span-1">
+
+              <div>
                 <label htmlFor="quantity" className={labelClass}>
                   Số lượng <span className="text-rose-500">*</span>
                 </label>
@@ -141,65 +214,141 @@ export default function NewBatch() {
                     required
                     className={`${inputClass} min-w-0`}
                   />
-                  <select aria-label="Đơn vị" value={unit} onChange={(e) => setUnit(e.target.value)} className={`${inputClass} w-24`}>
-                    {UNITS.map((u) => (
-                      <option key={u.value} value={u.value}>
+                  <select aria-label="Đơn vị" value={unit} onChange={(e) => setUnit(e.target.value)} className={`${inputClass} w-40`} disabled={!productType}>
+                    {units.map((u) => (
+                      <option key={u.id} value={u.code}>
                         {u.label}
                       </option>
                     ))}
                   </select>
                 </div>
+                {selectedUnit && selectedUnit.factor !== 1 && Number(quantity) > 0 && (
+                  <p className="text-xs text-slate-500 mt-1">
+                    = {(Number(quantity) * selectedUnit.factor).toLocaleString('vi-VN')} {selectedUnit.baseUnit} (quy đổi theo danh mục)
+                  </p>
+                )}
               </div>
-            </div>
-            <div>
-              <label htmlFor="origin" className={labelClass}>
-                Vùng trồng / nông trại <span className="text-rose-500">*</span>
-              </label>
-              <input
-                id="origin"
-                value={origin}
-                onChange={(e) => setOrigin(e.target.value)}
-                required
-                maxLength={200}
-                placeholder="VD: Cầu Đất, Đà Lạt, Lâm Đồng"
-                className={inputClass}
+
+              {productType && workflows.length > 0 && (
+                <div>
+                  <label htmlFor="workflow" className={labelClass}>
+                    Quy trình
+                  </label>
+                  <select id="workflow" value={workflow?.code ?? ''} onChange={(e) => setWorkflowCode(e.target.value)} className={inputClass}>
+                    {workflows.map((w) => (
+                      <option key={w.id} value={w.code}>
+                        {w.name}
+                      </option>
+                    ))}
+                  </select>
+                  {workflow && <WorkflowSteps workflow={workflow} className="mt-2" />}
+                </div>
+              )}
+
+              <div>
+                <label htmlFor="plot" className={labelClass}>
+                  Lô đất
+                </label>
+                <select
+                  id="plot"
+                  value={plotId}
+                  onChange={(e) => {
+                    setPlotId(e.target.value)
+                    const p = plots.find((x) => x.id === e.target.value)
+                    if (p && !origin) setOrigin(p.name)
+                  }}
+                  className={inputClass}
+                >
+                  <option value="">— Không gắn lô đất —</option>
+                  {plots.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.code} · {p.name} ({p.areaHa.toLocaleString('vi-VN')} ha)
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
+                  Gắn lô đất để truy ngược được toạ độ nơi trồng và kiểm sản lượng theo diện tích.{' '}
+                  {plots.length === 0 && (
+                    <Link to="/plots" className="text-brand-600 dark:text-brand-400 underline">
+                      Thêm lô đất
+                    </Link>
+                  )}
+                </p>
+              </div>
+              <div>
+                <label htmlFor="origin" className={labelClass}>
+                  Vùng trồng / nông trại <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  id="origin"
+                  value={origin}
+                  onChange={(e) => setOrigin(e.target.value)}
+                  required
+                  maxLength={200}
+                  placeholder="VD: Cầu Đất, Đà Lạt, Lâm Đồng"
+                  className={inputClass}
+                />
+                <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">Dùng làm xuất xứ của lô và địa điểm thu hoạch.</p>
+              </div>
+            </fieldset>
+
+            <div className={cardClass({ padding: 'lg', className: 'space-y-4' })}>
+              <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
+                <Sprout className="w-4 h-4 text-emerald-500" /> {catalog.stageLabel(firstStage)}
+              </h2>
+              {!productType ? (
+                <p className="text-sm text-slate-400">Chọn loại hàng để hiện các trường thông tin.</p>
+              ) : (
+                <StageFieldsInput fields={fields} values={harvest} onChange={setHarvest} />
+              )}
+              <OccurredAtInput
+                label="Thời điểm thu hoạch"
+                value={occurredAt}
+                onChange={setOccurredAt}
+                lateReason={lateReason}
+                onLateReasonChange={setLateReason}
+                maxBackdateDays={settings.maxBackdateDays}
               />
-              <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">Dùng làm xuất xứ của lô và địa điểm thu hoạch.</p>
+              <div>
+                <label htmlFor="notes" className={labelClass}>
+                  Ghi chú
+                </label>
+                <textarea
+                  id="notes"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  rows={2}
+                  maxLength={2000}
+                  placeholder="Chỉ nội bộ — không hiển thị cho người tiêu dùng"
+                  className={`${inputClass} resize-none`}
+                />
+              </div>
+              {rules && (
+                <HandoffSelect
+                  roles={nextRoles}
+                  label={`Bàn giao cho (${nextLabel})`}
+                  actors={actors}
+                  value={assignNextTo}
+                  onChange={onHandoffChange}
+                  isAdmin={isAdmin}
+                  excludeId={actor?.id}
+                />
+              )}
             </div>
-          </fieldset>
 
-          <div className={cardClass({ padding: 'lg', className: 'space-y-4' })}>
-            <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
-              <Sprout className="w-4 h-4 text-emerald-500" /> Thu hoạch
-            </h2>
-            <StageFieldsInput stage="HARVEST" values={harvest} onChange={setHarvest} />
-            <div>
-              <label htmlFor="notes" className={labelClass}>
-                Ghi chú
-              </label>
-              <textarea
-                id="notes"
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                rows={2}
-                maxLength={2000}
-                placeholder="Chỉ nội bộ — không hiển thị cho người tiêu dùng"
-                className={`${inputClass} resize-none`}
-              />
+            {error && (
+              <div role="alert" className="lg:col-span-2 bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/20 text-rose-700 dark:text-rose-400 text-sm rounded-xl px-3.5 py-2.5">
+                {error}
+              </div>
+            )}
+
+            <div className="lg:col-span-2 flex justify-end">
+              <Button type="submit" disabled={submitting || !productType} className="w-full lg:w-auto lg:min-w-64">
+                {submitting ? 'Đang lưu...' : created ? 'Lưu lại thu hoạch' : 'Tạo lô & bàn giao'}
+              </Button>
             </div>
-            <HandoffSelect nextStage="PROCESSING" actors={actors} value={assignNextTo} onChange={onHandoffChange} isAdmin={isAdmin} />
-          </div>
-
-          {error && (
-            <div role="alert" className="bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/20 text-rose-700 dark:text-rose-400 text-sm rounded-xl px-3.5 py-2.5">
-              {error}
-            </div>
-          )}
-
-          <Button type="submit" disabled={submitting} className="w-full">
-            {submitting ? 'Đang lưu...' : created ? 'Lưu lại thu hoạch' : 'Tạo lô & bàn giao'}
-          </Button>
-        </form>
+          </form>
+        )}
       </main>
     </div>
   )

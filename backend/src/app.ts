@@ -14,6 +14,10 @@ import { eventRoutes } from './api/routes/events';
 import { notificationsRoutes } from './api/routes/notifications';
 import { statsRoutes } from './api/routes/stats';
 import { traceRoutes } from './api/routes/trace';
+import { lineageRoutes } from './api/routes/lineage';
+import { plotRoutes } from './api/routes/plots';
+import { transferRoutes } from './api/routes/transfers';
+import { catalogRoutes } from './api/routes/catalog';
 import { errorHandler } from './api/middleware/error';
 
 export function createApp(ctx: AppContext, publicOrigin: string): Express {
@@ -51,9 +55,13 @@ export function createApp(ctx: AppContext, publicOrigin: string): Express {
   app.use('/api/auth', authRoutes(ctx.authService));
   app.use('/api/batches', batchRoutes(ctx.supplyChainService, ctx.authService, publicOrigin));
   app.use('/api/events', eventRoutes(ctx.supplyChainService, ctx.authService));
-  app.use('/api/trace', traceRoutes(ctx.traceService, ctx.authService));
+  app.use('/api/trace', traceRoutes(ctx.traceService, ctx.authService, ctx.anchorInfo, ctx.supplyChainService));
+  app.use('/api/transfers', transferRoutes(ctx.supplyChainService, ctx.authService));
+  app.use('/api/catalog', catalogRoutes(ctx.catalogService, ctx.authService));
   app.use('/api/stats', statsRoutes(ctx.statsService, ctx.authService));
-  app.use('/api/admin', adminRoutes(ctx.adminService, ctx.authService));
+  app.use('/api/transformations', lineageRoutes(ctx.lineageService, ctx.plotService, ctx.authService));
+  app.use('/api/plots', plotRoutes(ctx.plotService, ctx.authService));
+  app.use('/api/admin', adminRoutes(ctx.adminService, ctx.authService, ctx));
   app.use('/api/actors', actorsRoutes(ctx.adminService, ctx.authService));
   app.use('/api/notifications', notificationsRoutes(ctx.adminService, ctx.authService));
 

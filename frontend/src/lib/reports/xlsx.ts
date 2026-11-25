@@ -1,5 +1,5 @@
 import type { Workbook, Worksheet } from 'exceljs'
-import { Batch, STAGE_LABELS } from '../../api/client'
+import { Batch, stageLabel } from '../../api/client'
 import { batchStatusText, BatchReport, formatDateTime } from './model'
 
 /**
@@ -113,6 +113,7 @@ export async function buildBatchXlsx(report: BatchReport): Promise<Blob> {
       { header: 'STT', key: 'index', width: 6 },
       { header: 'Khâu', key: 'stage', width: 20 },
       { header: 'Thời gian', key: 'time', width: 18, numFmt: DATE_TIME_FMT },
+      { header: 'Ghi nhận lúc', key: 'recorded', width: 18, numFmt: DATE_TIME_FMT },
       { header: 'Đơn vị thực hiện', key: 'org', width: 28, wrap: true },
       { header: 'Người thực hiện', key: 'person', width: 24, wrap: true },
       { header: 'Vai trò', key: 'role', width: 16 },
@@ -125,6 +126,7 @@ export async function buildBatchXlsx(report: BatchReport): Promise<Blob> {
       index: s.index,
       stage: s.stageLabel,
       time: excelLocalDate(s.time),
+      recorded: excelLocalDate(s.recordedAt),
       org: s.organization,
       person: s.person,
       role: s.role,
@@ -190,7 +192,7 @@ export async function buildBatchListXlsx(batches: Batch[], filters: BatchListFil
       origin: b.origin,
       qty: b.quantity,
       unit: b.unit,
-      stage: b.currentStage ? STAGE_LABELS[b.currentStage] : 'Chưa bắt đầu',
+      stage: stageLabel(b.currentStage),
       status: batchStatusText(b),
       created: excelLocalDate(new Date(b.createdAt)),
       updated: b.lastEventAt ? excelLocalDate(new Date(b.lastEventAt)) : null,

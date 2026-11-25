@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
-import { Siren, TriangleAlert } from 'lucide-react'
+import { Inbox, Siren, TriangleAlert } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
-import { connectSocket, disconnectSocket, Anomaly, Batch } from '../api/client'
+import { connectSocket, disconnectSocket, Anomaly, Batch, Transfer } from '../api/client'
 
 interface ToastItem {
   id: string
   message: string
-  kind: 'anomaly' | 'recall'
+  kind: 'anomaly' | 'recall' | 'transfer'
 }
 
 const TOAST_LIFETIME_MS = 6000
@@ -38,11 +38,27 @@ export default function RealtimeAlerts() {
       push({ id: `recall-${batch.id}-${Date.now()}`, message: `Lô "${batch.productName}" đã bị thu hồi`, kind: 'recall' })
     }
 
+    // A new hand-over reaches the receiver; the receiver's answer reaches the sender.
+    const onTransfer = (t: Transfer) => {
+      const qty = `${t.quantity.toLocaleString('vi-VN')} ${t.unit}`
+      const message =
+        t.status === 'PENDING'
+          ? `Bạn có hàng được bàn giao (${qty}) — vào "Việc cần làm" để xác nhận`
+          : t.status === 'ACCEPTED'
+            ? `Bên nhận đã xác nhận nhận ${(t.receivedQuantity ?? t.quantity).toLocaleString('vi-VN')} ${t.unit}`
+            : t.status === 'REJECTED'
+              ? `Bên nhận từ chối nhận hàng${t.responseReason ? `: ${t.responseReason}` : ''}`
+              : `Lần bàn giao ${qty} đã được huỷ`
+      push({ id: `transfer-${t.id}-${t.status}`, message, kind: 'transfer' })
+    }
+
     socket.on('anomaly', onAnomaly)
     socket.on('recall', onRecall)
+    socket.on('transfer', onTransfer)
     return () => {
       socket.off('anomaly', onAnomaly)
       socket.off('recall', onRecall)
+      socket.off('transfer', onTransfer)
     }
   }, [token])
 
@@ -55,10 +71,16 @@ export default function RealtimeAlerts() {
           key={t.id}
           role="alert"
           className={`rounded-xl px-4 py-3 text-sm shadow-card-hover dark:shadow-none text-white backdrop-blur-sm animate-slide-up flex items-start gap-2 ${
-            t.kind === 'recall' ? 'bg-rose-600/95 dark:bg-rose-600/90' : 'bg-amber-500/95 dark:bg-amber-500/90'
+            t.kind === 'recall' ? 'bg-rose-600/95 dark:bg-rose-600/90' : t.kind === 'transfer' ? 'bg-sky-600/95 dark:bg-sky-600/90' : 'bg-amber-500/95 dark:bg-amber-500/90'
           }`}
         >
-          {t.kind === 'recall' ? <Siren className="w-4 h-4 flex-shrink-0" /> : <TriangleAlert className="w-4 h-4 flex-shrink-0" />}
+          {t.kind === 'recall' ? (
+            <Siren className="w-4 h-4 flex-shrink-0" />
+          ) : t.kind === 'transfer' ? (
+            <Inbox className="w-4 h-4 flex-shrink-0" />
+          ) : (
+            <TriangleAlert className="w-4 h-4 flex-shrink-0" />
+          )}
           <span>{t.message}</span>
         </div>
       ))}

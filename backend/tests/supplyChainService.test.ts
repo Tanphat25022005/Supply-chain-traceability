@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { verifyChain } from '../src/ledger/hashChain';
 import { PostgresEventRepo } from '../src/repository/postgres/eventRepo';
 import { ConflictError, ForbiddenError, NotFoundError } from '../src/services/supplyChainService';
-import { createActor, createTenant, sampleBatch, TestDb, useTestDatabase } from './helpers/testDb';
+import { acceptHandOver, coffeeCherry, createActor, createTenant, sampleBatch, STAGE_DATA, step, TestDb, useTestDatabase } from './helpers/testDb';
 
 const getDb = useTestDatabase();
 
@@ -22,6 +22,7 @@ describe('SupplyChainService', () => {
     const batch = await svc.createBatch(farmer, sampleBatch);
     expect(batch).toMatchObject({
       currentStage: null,
+      status: 'ACTIVE',
       isRecalled: false,
       createdBy: farmer.id,
       assignedToActorId: farmer.id,
@@ -30,41 +31,40 @@ describe('SupplyChainService', () => {
     });
   });
 
-  it('records a v2 event, advances the stage and hands custody to the named next actor', async () => {
-    const { farmer, processor, svc } = await setup(getDb());
+  it('records a v4 event, advances the stage and opens a hand-over the receiver must accept', async () => {
+    const t = getDb();
+    const { farmer, processor, svc } = await setup(t);
     const batch = await svc.createBatch(farmer, sampleBatch);
     const event = await svc.recordEvent(farmer, {
       batchId: batch.id,
       stage: 'HARVEST',
       location: 'Đắk Lắk',
-      data: { moisture: 12.5, lot: 'A-1' },
+      data: { variety: 'Robusta TR4' },
       assignNextTo: processor.id,
     });
-    expect(event).toMatchObject({ sequenceNumber: 0, hashVersion: 2, prevHash: '0'.repeat(64) });
-    expect(event.salt).toMatch(/^[0-9a-f]{64}$/);
+    expect(event).toMatchObject({ sequenceNumber: 0, hashVersion: 4, prevHash: '0'.repeat(64), kind: 'OBSERVE' });
+    expect(Object.values(event.claimSalts!).every((s) => /^[0-9a-f]{64}$/.test(s))).toBe(true);
 
-    const updated = await svc.getBatch(farmer, batch.id);
-    expect(updated).toMatchObject({
-      currentStage: 'HARVEST',
-      assignedToActorId: processor.id,
-      headHash: event.hash,
-      eventCount: 1,
-    });
+    // Custody stays with the farmer until the processor confirms what arrived.
+    const inTransit = await svc.getBatch(farmer, batch.id);
+    expect(inTransit).toMatchObject({ currentStage: 'HARVEST', status: 'IN_TRANSIT', assignedToActorId: farmer.id, eventCount: 2 });
+    await expect(svc.recordEvent(processor, { batchId: batch.id, stage: 'PROCESSING', location: 'x', data: STAGE_DATA.PROCESSING })).rejects.toThrow(
+      /in transit/,
+    );
+
+    await acceptHandOver(t, processor, batch.id);
+    expect(await svc.getBatch(farmer, batch.id)).toMatchObject({ status: 'ACTIVE', assignedToActorId: processor.id, eventCount: 3 });
   });
 
   it('chains prevHash across consecutive events and the stored chain verifies against its head', async () => {
     const t = getDb();
     const { farmer, processor, inspector, svc } = await setup(t);
     const batch = await svc.createBatch(farmer, sampleBatch);
-    const e1 = await svc.recordEvent(farmer, { batchId: batch.id, stage: 'HARVEST', location: 'a', assignNextTo: processor.id });
-    const e2 = await svc.recordEvent(processor, {
-      batchId: batch.id,
-      stage: 'PROCESSING',
-      location: 'b',
-      assignNextTo: inspector.id,
-    });
-    expect(e2.prevHash).toBe(e1.hash);
-    expect(e2.sequenceNumber).toBe(1);
+    const e1 = await step(t, farmer, batch.id, 'HARVEST', { assignNextTo: processor });
+    const e2 = await step(t, processor, batch.id, 'PROCESSING', { assignNextTo: inspector });
+    expect(e1.sequenceNumber).toBe(0);
+    // HARVEST, TRANSFER_OUT, TRANSFER_ACCEPT, then PROCESSING — one chain, custody included.
+    expect(e2.sequenceNumber).toBe(3);
 
     const stored = await t.db.withTenant(farmer.tenantId, () => new PostgresEventRepo(t.db).findByBatchId(batch.id));
     const head = await svc.getBatch(farmer, batch.id);
@@ -102,9 +102,10 @@ describe('SupplyChainService', () => {
 
   it('rejects assignNextTo pointing at an actor whose role cannot handle the next stage', async () => {
     const { farmer, retailer, svc } = await setup(getDb());
-    const batch = await svc.createBatch(farmer, sampleBatch);
+    // Coffee export: after HARVEST come COLLECTION (optional) and PROCESSING (required) — no retailer.
+    const batch = await svc.createBatch(farmer, coffeeCherry);
     await expect(
-      svc.recordEvent(farmer, { batchId: batch.id, stage: 'HARVEST', location: 'x', assignNextTo: retailer.id }),
+      svc.recordEvent(farmer, { batchId: batch.id, stage: 'HARVEST', location: 'x', data: { variety: 'ROBUSTA' }, assignNextTo: retailer.id }),
     ).rejects.toThrow(ConflictError);
   });
 
@@ -131,7 +132,7 @@ describe('SupplyChainService', () => {
   it('writes nothing when the hand-off is invalid (whole operation is one transaction)', async () => {
     const t = getDb();
     const { farmer, retailer, svc } = await setup(t);
-    const batch = await svc.createBatch(farmer, sampleBatch);
+    const batch = await svc.createBatch(farmer, coffeeCherry);
     await expect(
       svc.recordEvent(farmer, { batchId: batch.id, stage: 'HARVEST', location: 'x', assignNextTo: retailer.id }),
     ).rejects.toThrow();
@@ -140,10 +141,11 @@ describe('SupplyChainService', () => {
   });
 
   it('clears the assignment once the terminal RETAIL stage is recorded — chain complete', async () => {
-    const { retailer, admin, svc } = await setup(getDb());
+    const t = getDb();
+    const { retailer, admin, svc } = await setup(t);
     const batch = await svc.createBatch(admin, sampleBatch);
-    await svc.recordEvent(admin, { batchId: batch.id, stage: 'DISTRIBUTION', location: 'x', assignNextTo: retailer.id });
-    await svc.recordEvent(retailer, { batchId: batch.id, stage: 'RETAIL', location: 'x' });
+    await step(t, admin, batch.id, 'DISTRIBUTION', { assignNextTo: retailer });
+    await step(t, retailer, batch.id, 'RETAIL');
     expect((await svc.getBatch(admin, batch.id)).assignedToActorId).toBeUndefined();
   });
 
@@ -177,7 +179,7 @@ describe('SupplyChainService', () => {
     const { farmer, admin, svc } = await setup(t);
     const batch = await svc.createBatch(farmer, sampleBatch);
     const recalled = await svc.recallBatch(admin, batch.id, 'Nhiễm khuẩn');
-    expect(recalled).toMatchObject({ isRecalled: true, recallReason: 'Nhiễm khuẩn' });
+    expect(recalled).toMatchObject({ status: 'RECALLED', isRecalled: true, recallReason: 'Nhiễm khuẩn' });
 
     const { items } = await t.ctx.adminService.listAuditLogs(admin, 1, 20);
     expect(items.some((e) => e.action === 'BATCH_RECALLED' && e.entityId === batch.id)).toBe(true);
@@ -213,14 +215,20 @@ describe('SupplyChainService', () => {
     expect(underscore.total).toBe(0);
   });
 
-  it('lists the work queue: next stage matches role, and the batch is assigned to me or unclaimed', async () => {
-    const { farmer, processor, admin, svc } = await setup(getDb());
+  it('lists the work queue: lots I hold, or unclaimed ones whose next step is mine; hand-overs wait in the inbox', async () => {
+    const t = getDb();
+    const { farmer, processor, admin, svc } = await setup(t);
     const mine = await svc.createBatch(farmer, { ...sampleBatch, productName: 'mine' });
-    await svc.createBatch(admin, { ...sampleBatch, productName: 'admins' }); // assigned to admin
+    await svc.createBatch(admin, { ...sampleBatch, productName: 'admins' }); // held by admin
     const handed = await svc.createBatch(farmer, { ...sampleBatch, productName: 'handed' });
     await svc.recordEvent(farmer, { batchId: handed.id, stage: 'HARVEST', location: 'x', assignNextTo: processor.id });
 
     expect((await svc.listPendingForActor(farmer)).map((b) => b.id)).toEqual([mine.id]);
+    // In transit: not yet in the processor's queue, but in their inbox.
+    expect(await svc.listPendingForActor(processor)).toEqual([]);
+    expect((await svc.listIncomingTransfers(processor)).map((x) => x.batchId)).toEqual([handed.id]);
+
+    await acceptHandOver(t, processor, handed.id);
     expect((await svc.listPendingForActor(processor)).map((b) => b.id)).toEqual([handed.id]);
     expect((await svc.listPendingForActor(admin)).length).toBe(3);
   });
@@ -237,9 +245,9 @@ describe('SupplyChainService', () => {
   it('does not let currentStage regress when a duplicate/earlier stage is recorded', async () => {
     const { admin, svc } = await setup(getDb());
     const batch = await svc.createBatch(admin, sampleBatch);
-    await svc.recordEvent(admin, { batchId: batch.id, stage: 'HARVEST', location: 'x' });
-    await svc.recordEvent(admin, { batchId: batch.id, stage: 'PROCESSING', location: 'x' });
-    await svc.recordEvent(admin, { batchId: batch.id, stage: 'HARVEST', location: 'x' });
+    await step(getDb(), admin, batch.id, 'HARVEST');
+    await step(getDb(), admin, batch.id, 'PROCESSING');
+    await step(getDb(), admin, batch.id, 'HARVEST');
     expect((await svc.getBatch(admin, batch.id)).currentStage).toBe('PROCESSING');
   });
 
@@ -247,8 +255,8 @@ describe('SupplyChainService', () => {
     const t = getDb();
     const { admin, svc } = await setup(t);
     const batch = await svc.createBatch(admin, sampleBatch);
-    await svc.recordEvent(admin, { batchId: batch.id, stage: 'HARVEST', location: 'x' });
-    await svc.recordEvent(admin, { batchId: batch.id, stage: 'PACKAGING', location: 'x' });
+    await step(t, admin, batch.id, 'HARVEST');
+    await step(t, admin, batch.id, 'PACKAGING');
     const { items } = await t.ctx.adminService.listAnomalies(admin, { page: 1, pageSize: 10 });
     expect(items.some((a) => a.type === 'STAGE_SKIPPED' && a.batchId === batch.id)).toBe(true);
   });
@@ -261,7 +269,7 @@ describe('SupplyChainService', () => {
 
       const events = await Promise.all(
         (['HARVEST', 'PROCESSING', 'QUALITY_CHECK', 'PACKAGING', 'DISTRIBUTION'] as const).map((stage) =>
-          svc.recordEvent(admin, { batchId: batch.id, stage, location: stage }),
+          svc.recordEvent(admin, { batchId: batch.id, stage, location: stage, data: STAGE_DATA[stage] }),
         ),
       );
 
@@ -285,11 +293,12 @@ describe('SupplyChainService', () => {
         const final = await svc.getBatch(admin, batch.id);
         expect(final.isRecalled).toBe(true);
         if (eventResult.status === 'fulfilled') {
-          // The event won the lock: its stage advance must survive the recall.
-          expect(final).toMatchObject({ currentStage: 'HARVEST', assignedToActorId: processor.id, eventCount: 1 });
+          // The event won the lock: its stage advance and hand-over survive the
+          // recall, which then closes the pending transfer — HARVEST, TRANSFER_OUT, RECALL.
+          expect(final).toMatchObject({ currentStage: 'HARVEST', assignedToActorId: farmer.id, eventCount: 3 });
         } else {
           expect(eventResult.reason).toBeInstanceOf(ConflictError);
-          expect(final).toMatchObject({ currentStage: null, eventCount: 0 });
+          expect(final).toMatchObject({ currentStage: null, eventCount: 1 }); // just the RECALL
         }
       }
     });
